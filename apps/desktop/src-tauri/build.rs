@@ -25,6 +25,7 @@ const COMMANDS: &[&str] = &[
     "open_login_items",
     "third_party_licenses",
     "openvpn_notice",
+    "window_chrome",
 ];
 
 fn main() {

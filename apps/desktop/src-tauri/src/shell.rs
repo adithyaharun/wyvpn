@@ -26,6 +26,7 @@ pub const EVENT_CHANNEL: &str = "daemon://event";
 pub const AVAILABILITY_CHANNEL: &str = "daemon://availability";
 pub const STATUSES_CHANNEL: &str = "daemon://statuses";
 pub const PROFILES_CHANNEL: &str = "daemon://profiles";
+#[cfg(target_os = "macos")]
 pub const LICENSES_CHANNEL: &str = "app://open-licenses";
 pub const DEFAULT_MISSING_CHANNEL: &str = "app://default-profile-missing";
 const USER_DISCONNECT_WINDOW: Duration = Duration::from_secs(10);
@@ -204,6 +205,7 @@ pub fn show_main(app: &AppHandle) {
     tauri::async_runtime::spawn(refresh(app.clone()));
 }
 
+#[cfg(target_os = "macos")]
 pub fn show_licenses(app: &AppHandle) {
     show_main(app);
     let _ = app.emit(LICENSES_CHANNEL, ());

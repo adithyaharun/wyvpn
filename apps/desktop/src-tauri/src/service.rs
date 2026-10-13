@@ -2,6 +2,7 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum ServiceStatus {
     NotRegistered,
     Enabled,
@@ -75,14 +76,12 @@ mod imp {
         Err("service registration is not supported on this system".to_owned())
     }
 
-    pub fn unregister() -> Result<(), String> {
-        Err("service registration is not supported on this system".to_owned())
-    }
-
     pub fn open_login_items() {}
 }
 
-pub use imp::{applicable, open_login_items, register, status, unregister};
+#[cfg(target_os = "macos")]
+pub use imp::unregister;
+pub use imp::{applicable, open_login_items, register, status};
 
 #[cfg(test)]
 mod tests {

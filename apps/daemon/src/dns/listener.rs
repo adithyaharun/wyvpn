@@ -74,10 +74,9 @@ mod tests {
     use crate::dns::report::{DnsSettings, HookPhase};
 
     fn send(dir: &Path, payload: &[u8]) -> std::thread::JoinHandle<String> {
-        let path = dir.join(SOCKET_NAME);
+        let mut stream = UnixStream::connect(dir.join(SOCKET_NAME)).unwrap();
         let payload = payload.to_vec();
         std::thread::spawn(move || {
-            let mut stream = UnixStream::connect(path).unwrap();
             stream.write_all(&payload).unwrap();
             let mut ack = String::new();
             let _ = BufReader::new(stream).read_line(&mut ack);

@@ -86,7 +86,8 @@ New-Item -ItemType Directory -Force $Out | Out-Null
 
 $tapctl = Join-Path $binDir 'tapctl.exe'
 if (-not (Test-Path $tapctl)) { throw "tapctl.exe not found next to openvpn.exe" }
-$binaries = @($openvpnExe[0], (Get-Item $tapctl)) + @(Get-ChildItem -Path $binDir -File -Filter '*.dll')
+# openvpnservmsg.dll ships unsigned and only serves OpenVPN's own Windows service, which we do not install
+$binaries = @($openvpnExe[0], (Get-Item $tapctl)) + @(Get-ChildItem -Path $binDir -File -Filter '*.dll' | Where-Object Name -ne 'openvpnservmsg.dll')
 foreach ($file in $binaries) {
     Assert-Signed $file.FullName @($OpenVpnPublisher, 'Microsoft Corporation')
     Copy-Item $file.FullName $Out

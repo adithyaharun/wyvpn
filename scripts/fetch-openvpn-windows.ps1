@@ -50,7 +50,10 @@ function Get-MsiRows([string]$Msi, [string]$Query, [int]$Columns) {
     while ($true) {
         $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
         if ($null -eq $rec) { break }
-        $rows += , @(1..$Columns | ForEach-Object { $rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, @($_)) })
+        $row = for ($i = 1; $i -le $Columns; $i++) {
+            $rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, [object[]]@([int]$i))
+        }
+        $rows += , @($row)
     }
     $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null) | Out-Null
     return , $rows
@@ -93,32 +96,31 @@ foreach ($file in $binaries) {
     Copy-Item $file.FullName $Out
 }
 
-$dirs = @{}
-$dirRows = Get-MsiRows $msi 'SELECT `Directory`, `Directory_Parent`, `DefaultDir` FROM `Directory`' 3
-foreach ($row in $dirRows) {
-    $dirs[$row[0]] = $row
+# msiexec /a skips the merge-module driver files, so they come straight from the embedded cabinet
+$sevenZip = Get-Command 7z -ErrorAction SilentlyContinue
+if (-not $sevenZip) { throw "7z is required to unpack the ovpn-dco driver from the MSI" }
+$cabDir = Join-Path $Work 'cab'
+& $sevenZip.Source x -y "-o$cabDir" $msi | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "7z could not unpack $msi" }
+foreach ($cab in @(Get-ChildItem -Path $cabDir -File -Filter '*.cab')) {
+    & $sevenZip.Source x -y "-o$cabDir" $cab.FullName | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "7z could not unpack $($cab.Name)" }
 }
-$components = Get-MsiRows $msi 'SELECT `File`.`FileName`, `Component`.`Component`, `Component`.`Directory_` FROM `File`, `Component` WHERE `File`.`Component_` = `Component`.`Component`' 3
-# nx20 (NetAdapterCx 2.0) runs on Windows 10 and 11; nx21 is the Windows 11 build.
+
+$files = Get-MsiRows $msi 'SELECT `File`, `FileName`, `Component_` FROM `File`' 3
 $variants = @{ 'nx20' = 'driver'; 'nx21' = 'driver\win11' }
 foreach ($variant in $variants.Keys) {
-    $row = $components | Where-Object { (Get-LongName $_[0]) -eq 'ovpn-dco.sys' -and $_[1] -match $variant } | Select-Object -First 1
-    if (-not $row) { throw "ovpn-dco $variant driver not found in the MSI" }
-    $parts = @()
-    $key = $row[2]
-    while ($key -and $dirs.ContainsKey($key)) {
-        $name = Get-LongName $dirs[$key][2]
-        if ($name -and $name -ne '.' -and $name -ne 'SourceDir') { $parts = @($name) + $parts }
-        $key = $dirs[$key][1]
-    }
-    $driverSrc = Join-Path $image ($parts -join '\')
-    if (-not (Test-Path (Join-Path $driverSrc 'ovpn-dco.sys'))) { throw "ovpn-dco $variant files not found at $driverSrc" }
     $driverOut = Join-Path $Out $variants[$variant]
     New-Item -ItemType Directory -Force $driverOut | Out-Null
     foreach ($ext in 'inf', 'sys', 'cat') {
-        $path = Join-Path $driverSrc "ovpn-dco.$ext"
-        if (-not (Test-Path $path)) { throw "missing $path" }
-        Copy-Item $path $driverOut
+        $candidates = @($files | Where-Object { (Get-LongName $_[1]) -eq "ovpn-dco.$ext" })
+        $row = $candidates | Where-Object { $_[2] -match $variant } | Select-Object -First 1
+        # the nx20 inf carries no variant suffix
+        if (-not $row -and $variant -eq 'nx20') { $row = $candidates | Where-Object { $_[2] -notmatch 'nx2[01]' } | Select-Object -First 1 }
+        if (-not $row) { throw "ovpn-dco.$ext ($variant) not found in the MSI" }
+        $path = Join-Path $cabDir $row[0]
+        if (-not (Test-Path -LiteralPath $path)) { throw "cabinet entry $($row[0]) not found" }
+        Copy-Item -LiteralPath $path (Join-Path $driverOut "ovpn-dco.$ext")
     }
     Assert-Signed (Join-Path $driverOut 'ovpn-dco.cat') @('Microsoft Corporation')
     $sys = Get-AuthenticodeSignature -FilePath (Join-Path $driverOut 'ovpn-dco.sys')

@@ -79,7 +79,7 @@ bun run package:macos      # or package:windows (Git Bash) / package:linux
 The installers land in `target/packaging/dist`. The packaging scripts stage files that `tauri build` needs only for release bundles:
 
 - `scripts/stage-binaries.sh` puts the sidecars in `apps/desktop/src-tauri/binaries/`.
-- `scripts/build-openvpn-macos.sh` and `scripts/fetch-openvpn-windows.ps1` stage OpenVPN in `apps/desktop/src-tauri/resources/openvpn-*`.
+- `scripts/build-openvpn-macos.sh` and `scripts/fetch-openvpn-windows.ps1` stage OpenVPN in `apps/desktop/src-tauri/resources/openvpn-*`. On Windows the fetch script needs `7z` on `PATH` (preinstalled on GitHub runners) to unpack the ovpn-dco driver from the MSI.
 - `scripts/gen-licenses.sh` writes `apps/desktop/src-tauri/resources/THIRD_PARTY_LICENSES`.
 
 These files are referenced from the `tauri.release*.conf.json` overlays, which only `scripts/package.sh` passes to `tauri build`. That way `tauri dev`, `cargo check -p wyvpn-app` and a plain `bun run build` work without them on every OS. A plain `bun run build` produces a bundle without the daemon, the CLI or OpenVPN, so it is not something to ship.

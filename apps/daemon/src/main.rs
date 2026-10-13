@@ -2,6 +2,8 @@ mod admin;
 mod control;
 mod dns;
 mod egress;
+#[cfg(any(target_os = "macos", all(test, unix)))]
+mod exe_watch;
 mod hook;
 mod launcher;
 mod listener;
@@ -67,7 +69,33 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
+#[cfg(target_os = "macos")]
+async fn shutdown_or_replaced(state: Arc<state::State>, baseline: Option<exe_watch::Identity>) {
+    let Ok(exe) = std::env::current_exe() else {
+        return shutdown_signal().await;
+    };
+    let watch = exe_watch::replaced(
+        exe,
+        baseline,
+        std::time::Duration::from_secs(5),
+        openvpn::signature::verify_hook,
+        move || {
+            state
+                .sessions
+                .close_if_restartable(!openvpn::signature::signed_build())
+        },
+    );
+    tokio::select! {
+        () = shutdown_signal() => {}
+        () = watch => tracing::info!("wyvpnd executable replaced; restarting"),
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    let baseline = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe_watch::Identity::read(&exe));
     let args = Args::parse();
     if let Some(Command::Hook { .. }) = args.command {
         hook::run();
@@ -80,7 +108,14 @@ fn main() -> anyhow::Result<()> {
         #[cfg(not(windows))]
         anyhow::bail!("service mode is only available on Windows");
     }
-    run(args, shutdown_signal(), || {})
+    #[cfg(target_os = "macos")]
+    return run(
+        args,
+        move |state| shutdown_or_replaced(state, baseline),
+        || {},
+    );
+    #[cfg(not(target_os = "macos"))]
+    run(args, |_| shutdown_signal(), || {})
 }
 
 fn init_logging() {
@@ -111,7 +146,11 @@ fn log_filter() -> EnvFilter {
     }
 }
 
-fn run(args: Args, shutdown: impl Future<Output = ()>, ready: impl FnOnce()) -> anyhow::Result<()> {
+fn run<F: Future<Output = ()>>(
+    args: Args,
+    shutdown: impl FnOnce(Arc<state::State>) -> F,
+    ready: impl FnOnce(),
+) -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -119,9 +158,9 @@ fn run(args: Args, shutdown: impl Future<Output = ()>, ready: impl FnOnce()) -> 
         .block_on(serve_daemon(args, shutdown, ready))
 }
 
-async fn serve_daemon(
+async fn serve_daemon<F: Future<Output = ()>>(
     args: Args,
-    shutdown: impl Future<Output = ()>,
+    shutdown: impl FnOnce(Arc<state::State>) -> F,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let path = wyvpn_ipc::socket_path();
@@ -148,7 +187,7 @@ async fn serve_daemon(
         listener,
         state.clone(),
         listener::Limits::default(),
-        shutdown,
+        shutdown(state.clone()),
     )
     .await?;
     state.sessions.shutdown().await;

@@ -98,7 +98,7 @@ fn run_service() -> anyhow::Result<()> {
         ));
     };
 
-    let result = crate::run(args, stopping, running);
+    let result = crate::run(args, move |_| stopping, running);
     if let Err(err) = &result {
         tracing::error!(%err, "wyvpnd failed");
     }

@@ -3,6 +3,7 @@
   import { onMount } from "svelte";
   import DaemonIncompatible from "$lib/components/DaemonIncompatible.svelte";
   import DaemonNotPermitted from "$lib/components/DaemonNotPermitted.svelte";
+  import DaemonOutdated from "$lib/components/DaemonOutdated.svelte";
   import DaemonSetup from "$lib/components/DaemonSetup.svelte";
   import DaemonStarting from "$lib/components/DaemonStarting.svelte";
   import DaemonUnavailable from "$lib/components/DaemonUnavailable.svelte";
@@ -71,6 +72,10 @@
     <DaemonStarting socket={daemon.socket} />
   {:else}
     <DaemonUnavailable socket={daemon.socket} />
+  {/if}
+
+  {#if daemon.available && daemon.mismatch}
+    <DaemonOutdated mismatch={daemon.mismatch} />
   {/if}
 
   <DefaultProfileNotice onopensettings={() => (panel = "settings")} />

@@ -53,6 +53,33 @@ describe("applyEvent", () => {
     expect(state.status).toBe("starting");
   });
 
+  it("stays available and keeps the mismatch for an outdated service", () => {
+    const mismatch = { client_version: "0.1.2", client_protocol: 1, daemon_version: "0.1.1", daemon_protocol: 1 };
+    const state = applyEvent(initialState(), {
+      type: "availability",
+      available: true,
+      socket: "/run/w.sock",
+      status: "available",
+      mismatch,
+    });
+    expect(state.available).toBe(true);
+    expect(state.status).toBe("available");
+    expect(state.mismatch).toEqual(mismatch);
+  });
+
+  it("clears the mismatch once the service reports without one", () => {
+    let state = applyEvent(initialState(), {
+      type: "availability",
+      available: true,
+      socket: "/run/w.sock",
+      status: "available",
+      mismatch: { client_version: "0.1.2", client_protocol: 1, daemon_version: "0.1.1", daemon_protocol: 1 },
+    });
+    state = applyEvent(state, { type: "availability", available: true, socket: "/run/w.sock", status: "available" });
+    expect(state.available).toBe(true);
+    expect(state.mismatch).toBeNull();
+  });
+
   it("applies state_changed to an existing status", () => {
     const state = applyEvent(withData(), {
       type: "state_changed",

@@ -34,6 +34,15 @@ impl Mismatch {
             daemon_protocol: None,
         }
     }
+
+    pub fn outdated(daemon_version: &str) -> Self {
+        Self {
+            client_version: wyvpn_ipc::VERSION.to_owned(),
+            client_protocol: wyvpn_ipc::PROTOCOL_VERSION,
+            daemon_version: Some(daemon_version.to_owned()),
+            daemon_protocol: Some(wyvpn_ipc::PROTOCOL_VERSION),
+        }
+    }
 }
 
 impl From<ProtocolMismatch> for Mismatch {
@@ -111,6 +120,7 @@ pub struct Client {
     pending: Vec<u8>,
     writer: WriteHalf<Stream>,
     next_id: u64,
+    daemon_version: String,
 }
 
 impl Client {
@@ -130,9 +140,14 @@ impl Client {
             pending: Vec::new(),
             writer,
             next_id: 1,
+            daemon_version: String::new(),
         };
         client.handshake().await?;
         Ok(client)
+    }
+
+    pub fn daemon_version(&self) -> &str {
+        &self.daemon_version
     }
 
     async fn handshake(&mut self) -> Result<(), ClientError> {
@@ -140,8 +155,12 @@ impl Client {
             Ok(Response::Hello {
                 daemon_version,
                 protocol,
-            }) => check_hello(&daemon_version, protocol)
-                .map_err(|mismatch| ClientError::Incompatible(Box::new(mismatch.into()))),
+            }) => {
+                check_hello(&daemon_version, protocol)
+                    .map_err(|mismatch| ClientError::Incompatible(Box::new(mismatch.into())))?;
+                self.daemon_version = daemon_version;
+                Ok(())
+            }
             _ => Err(ClientError::Incompatible(
                 Box::new(Mismatch::older_daemon()),
             )),

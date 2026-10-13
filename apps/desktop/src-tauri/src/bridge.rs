@@ -20,6 +20,7 @@ pub struct SessionLogReply {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonAvailability {
     Available,
+    Outdated(Mismatch),
     Unreachable,
     Incompatible(Mismatch),
     NotPermitted,
@@ -27,7 +28,15 @@ pub enum DaemonAvailability {
 
 impl DaemonAvailability {
     pub fn is_available(&self) -> bool {
-        matches!(self, Self::Available)
+        matches!(self, Self::Available | Self::Outdated(_))
+    }
+}
+
+fn ready_availability(daemon_version: &str, self_restarts: bool) -> DaemonAvailability {
+    if self_restarts && daemon_version != wyvpn_ipc::VERSION {
+        DaemonAvailability::Outdated(Mismatch::outdated(daemon_version))
+    } else {
+        DaemonAvailability::Available
     }
 }
 
@@ -204,9 +213,9 @@ impl Bridge {
         loop {
             let next = match subscribe(&self.socket, self.require_trusted_peer).await {
                 Ok(client) => {
-                    if tx.send(BridgeMsg::Subscribed).is_err()
-                        || !self.transition(&tx, DaemonAvailability::Available)
-                    {
+                    let ready =
+                        ready_availability(client.daemon_version(), cfg!(target_os = "macos"));
+                    if tx.send(BridgeMsg::Subscribed).is_err() || !self.transition(&tx, ready) {
                         return;
                     }
                     let connected_at = Instant::now();
@@ -312,6 +321,36 @@ async fn pump(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod ready_tests {
+    use super::*;
+
+    #[test]
+    fn outdated_when_daemon_restarts_itself_and_versions_differ() {
+        match ready_availability("9.9.9", true) {
+            DaemonAvailability::Outdated(mismatch) => {
+                assert_eq!(mismatch.daemon_version.as_deref(), Some("9.9.9"));
+                assert_eq!(mismatch.daemon_protocol, Some(wyvpn_ipc::PROTOCOL_VERSION));
+                assert_eq!(mismatch.client_version, wyvpn_ipc::VERSION);
+                assert_eq!(mismatch.client_protocol, wyvpn_ipc::PROTOCOL_VERSION);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn available_when_daemon_does_not_restart_itself_or_versions_match() {
+        assert_eq!(
+            ready_availability("9.9.9", false),
+            DaemonAvailability::Available
+        );
+        assert_eq!(
+            ready_availability(wyvpn_ipc::VERSION, true),
+            DaemonAvailability::Available
+        );
     }
 }
 
@@ -872,7 +911,11 @@ mod tests {
                         let envelope = decode_line::<RequestEnvelope>(line.as_bytes()).unwrap();
                         let response = ResponseEnvelope {
                             id: envelope.id,
-                            outcome: outcome.clone(),
+                            outcome: if matches!(envelope.request, Request::Subscribe) {
+                                Outcome::Result(Response::Subscribed)
+                            } else {
+                                outcome.clone()
+                            },
                         };
                         writer
                             .write_all(&encode_line(&response).unwrap())
@@ -952,6 +995,41 @@ mod tests {
         let error = bridge.list_profiles().await.unwrap_err();
         assert_eq!(error.code, "daemon_unavailable");
         assert!(error.message.contains("9.9.9"));
+    }
+
+    #[tokio::test]
+    async fn same_protocol_other_version_is_outdated() {
+        let (_dir, path) = socket();
+        let _server = serve_fixed(
+            &path,
+            Outcome::Result(Response::Hello {
+                daemon_version: "9.9.9".into(),
+                protocol: wyvpn_ipc::PROTOCOL_VERSION,
+            }),
+        );
+        let bridge = Arc::new(Bridge::new(path.to_string_lossy().into_owned()).trusting_any_peer());
+        assert_eq!(
+            first_availability(&bridge).await,
+            ready_availability("9.9.9", cfg!(target_os = "macos"))
+        );
+        assert!(bridge.is_available());
+    }
+
+    #[tokio::test]
+    async fn same_protocol_same_version_is_available() {
+        let (_dir, path) = socket();
+        let _server = serve_fixed(
+            &path,
+            Outcome::Result(Response::Hello {
+                daemon_version: wyvpn_ipc::VERSION.into(),
+                protocol: wyvpn_ipc::PROTOCOL_VERSION,
+            }),
+        );
+        let bridge = Arc::new(Bridge::new(path.to_string_lossy().into_owned()).trusting_any_peer());
+        assert_eq!(
+            first_availability(&bridge).await,
+            DaemonAvailability::Available
+        );
     }
 
     #[tokio::test]

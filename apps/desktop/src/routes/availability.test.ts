@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DaemonAvailability } from "$lib/types";
+import type { ConnectionStatus, DaemonAvailability, ProfileSummary } from "$lib/types";
 
 const invoke = vi.hoisted(() => vi.fn());
 const handlers = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
@@ -15,14 +15,45 @@ vi.mock("@tauri-apps/api/event", () => ({
 import { daemon } from "$lib/daemon.svelte";
 import Page from "./+page.svelte";
 
-function backend(availability: DaemonAvailability, service: string | null = null) {
+const office: ProfileSummary = {
+  id: "p1",
+  name: "Office",
+  server_name: "gw",
+  server_host: "vpn.example.com",
+  user: "alice",
+  auth_mode: "pin",
+  transports: ["open_vpn"],
+};
+
+const connected: ConnectionStatus = {
+  profile_id: "p1",
+  profile_name: "Office",
+  state: "connected",
+  transport: "open_vpn",
+  tunnel_ip: "10.0.0.2",
+  server_endpoint: "vpn.example.com:1194",
+  connected_since: 1_700_000_000,
+  rx_bytes: 0,
+  tx_bytes: 0,
+};
+
+const outdated = { client_version: "0.1.2", client_protocol: 1, daemon_version: "0.1.1", daemon_protocol: 1 };
+const outdatedTitle = "The WyVPN service restarts after you disconnect";
+
+function backend(
+  availability: DaemonAvailability,
+  service: string | null = null,
+  profiles: ProfileSummary[] = [],
+  statuses: ConnectionStatus[] = [],
+) {
   invoke.mockImplementation(async (command: string) => {
     switch (command) {
       case "daemon_state":
         return availability;
       case "list_profiles":
+        return profiles;
       case "status":
-        return [];
+        return statuses;
       case "service_status":
         return service;
       case "get_settings":
@@ -62,6 +93,7 @@ describe("daemon availability screens", () => {
     expect(await screen.findByText("Update WyVPN or restart the service")).toBeInTheDocument();
     expect(await screen.findByText("0.2.0 (protocol 2)")).toBeInTheDocument();
     expect(await screen.findByText("0.1.0 (protocol 1)")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: outdatedTitle })).not.toBeInTheDocument();
   });
 
   it("treats an older service without a version as incompatible", async () => {
@@ -119,6 +151,40 @@ describe("daemon availability screens", () => {
 
     handlers.get("daemon://availability")?.({ payload: { available: false, socket: "/s", status: "not_permitted" } });
     expect(await screen.findByText("Join the wyvpn group")).toBeInTheDocument();
+  });
+
+  it("keeps actions enabled behind the outdated notice while a tunnel is up", async () => {
+    backend({ available: true, socket: "/s", status: "available", mismatch: outdated }, null, [office], [connected]);
+    render(Page);
+
+    expect(await screen.findByRole("heading", { name: outdatedTitle })).toBeInTheDocument();
+    expect(screen.getByText("0.1.2")).toBeInTheDocument();
+    expect(screen.getByText("0.1.1")).toBeInTheDocument();
+    expect(screen.queryByText("Update WyVPN or restart the service")).not.toBeInTheDocument();
+    const disconnect = await screen.findByRole("button", { name: "Disconnect" });
+    await vi.waitFor(() => expect(disconnect).toBeEnabled());
+    expect(screen.getByRole("button", { name: "Connection log" })).toBeEnabled();
+
+    await fireEvent.click(disconnect);
+    expect(invoke).toHaveBeenCalledWith("disconnect", expect.objectContaining({ profileId: "p1" }));
+  });
+
+  it("omits the outdated notice when the versions match", async () => {
+    backend({ available: true, socket: "/s", status: "available" }, null, [office]);
+    render(Page);
+
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled());
+    expect(screen.queryByRole("heading", { name: outdatedTitle })).not.toBeInTheDocument();
+  });
+
+  it("removes the outdated notice once the service restarts", async () => {
+    backend({ available: true, socket: "/s", status: "available", mismatch: outdated }, null, [office]);
+    render(Page);
+    await screen.findByRole("heading", { name: outdatedTitle });
+    await vi.waitFor(() => expect(handlers.has("daemon://availability")).toBe(true));
+
+    handlers.get("daemon://availability")?.({ payload: { available: true, socket: "/s", status: "available" } });
+    await vi.waitFor(() => expect(screen.queryByRole("heading", { name: outdatedTitle })).not.toBeInTheDocument());
   });
 
   it("opens the licenses view from Settings", async () => {

@@ -6582,7 +6582,7 @@ dependencies = [
 
 [[package]]
 name = "wyvpn-app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "getrandom 0.3.4",
  "libloading",
@@ -6610,7 +6610,7 @@ dependencies = [
 
 [[package]]
 name = "wyvpn-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -6627,7 +6627,7 @@ dependencies = [
 
 [[package]]
 name = "wyvpn-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.23.1",
  "crypto_box",
@@ -6653,7 +6653,7 @@ dependencies = [
 
 [[package]]
 name = "wyvpn-daemon"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -6678,7 +6678,7 @@ dependencies = [
 
 [[package]]
 name = "wyvpn-ipc"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.23.1",
  "serde",

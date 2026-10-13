@@ -86,7 +86,7 @@ impl Bridge {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn trusting_any_peer(mut self) -> Self {
         self.require_trusted_peer = false;
         self

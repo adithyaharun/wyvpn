@@ -125,7 +125,7 @@ impl State {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn with_admin(mut self, admin: AdminConfig) -> Self {
         self.admin = admin;
         self

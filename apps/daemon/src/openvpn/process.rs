@@ -117,7 +117,7 @@ impl Prepared {
 }
 
 pub struct Tunnel {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     runtime_dir: PathBuf,
     stop: Option<oneshot::Sender<()>>,
     supervisor: JoinHandle<()>,
@@ -152,7 +152,7 @@ impl Tunnel {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn runtime_dir(&self) -> &Path {
         &self.runtime_dir
     }
@@ -200,7 +200,7 @@ impl Tunnel {
             }
         });
 
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         let runtime_dir = runtime.path().to_path_buf();
         let supervisor = tokio::spawn(supervise(Supervised {
             child,
@@ -214,7 +214,7 @@ impl Tunnel {
         }));
         Ok((
             Self {
-                #[cfg(test)]
+                #[cfg(all(test, unix))]
                 runtime_dir,
                 stop: Some(stop_tx),
                 supervisor,

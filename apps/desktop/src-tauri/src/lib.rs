@@ -144,3 +144,18 @@ pub fn run() {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn capability_allows_title_bar_double_click() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let permissions = capability["permissions"].as_array().unwrap();
+        assert!(
+            permissions
+                .iter()
+                .any(|p| p == "core:window:allow-internal-toggle-maximize")
+        );
+    }
+}

@@ -126,11 +126,13 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             about::install_menu(&handle)?;
             shell::probe(&handle);
-            let tray_ok = build_tray(&handle);
             let ctx = handle.state::<Ctx>();
+            ctx.store_service_state(&handle);
+            let approval_pending = ctx.model().approval_pending();
+            let tray_ok = build_tray(&handle);
             ctx.tray_ok.store(tray_ok, Ordering::Relaxed);
             let autostarted = std::env::args().any(|arg| arg == AUTOSTART_ARG);
-            if shell::start_visible(tray_ok, autostarted) {
+            if shell::start_visible(tray_ok, autostarted, approval_pending) {
                 shell::show_main(&handle);
             } else {
                 shell::hide_main(&handle);

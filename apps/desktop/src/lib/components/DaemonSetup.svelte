@@ -61,7 +61,7 @@
     <ShieldCheck class="glyph" size={16} strokeWidth={2} aria-hidden="true" />
     Approve the WyVPN background service
   </h1>
-  <p>WyVPN needs its background service approved before it can connect. You only do this once.</p>
+  <p>WyVPN needs its background service approved before it can connect.</p>
 
   {#if error}
     <p class="alert" role="alert">{error}</p>
@@ -69,7 +69,8 @@
       <button class="btn btn-secondary" type="button" onclick={retry}>Try again</button>
     </div>
   {:else if status === "requires_approval"}
-    <p>Turn on WyVPN under Allow in the Background in System Settings. This screen continues on its own.</p>
+    <p>macOS asks only once, and the WyVPN service then runs for all users of this Mac.</p>
+    <p>If you dismissed the macOS prompt, turn on WyVPN under Allow in the Background in System Settings, and this screen continues on its own.</p>
     <div class="actions">
       <button class="btn btn-primary" type="button" onclick={() => api.openLoginItems()}>
         Open System Settings

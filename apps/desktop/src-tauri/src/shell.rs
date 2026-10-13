@@ -14,10 +14,10 @@ use wyvpn_ipc::{ConnectionState, ConnectionStatus, Event, ProfileSummary, Reques
 use crate::autoconnect::{self, Decision};
 use crate::bridge::{Bridge, BridgeMsg, DaemonAvailability, EventConfig};
 use crate::error::sanitize;
-use crate::model::{AvailabilityPayload, COPY_TUNNEL_IP, DaemonStatus, Model};
+use crate::model::{APPROVE_SERVICE, AvailabilityPayload, COPY_TUNNEL_IP, DaemonStatus, Model};
 use crate::notifications::{self, Kind, Notification};
 use crate::retry::RetryStore;
-use crate::service;
+use crate::service::{self, ServiceStatus};
 use crate::settings::Settings;
 use crate::tray::{self, Rendered};
 
@@ -49,6 +49,7 @@ pub struct Ctx {
     auto_connect_done: AtomicBool,
     auto_connect_pending: Mutex<Option<String>>,
     subscribed: AtomicBool,
+    approval_notified: AtomicBool,
     startup_notice: Mutex<Option<StartupNotice>>,
     issued: AtomicU64,
     applied: AtomicU64,
@@ -73,6 +74,7 @@ impl Ctx {
             auto_connect_done: AtomicBool::new(false),
             auto_connect_pending: Mutex::default(),
             subscribed: AtomicBool::new(false),
+            approval_notified: AtomicBool::new(false),
             startup_notice: Mutex::default(),
             issued: AtomicU64::new(0),
             applied: AtomicU64::new(0),
@@ -180,6 +182,29 @@ impl Ctx {
             .take()
     }
 
+    pub fn notify_approval_once(&self, app: &AppHandle) {
+        if !self.approval_notified.swap(true, Ordering::SeqCst) {
+            notify(app, &Notification::approval_needed());
+        }
+    }
+
+    pub fn store_service_state(&self, app: &AppHandle) -> (AvailabilityPayload, bool) {
+        let payload = self.availability_payload();
+        let changed = self.model().set_daemon_state(&payload);
+        if payload.setup == Some(ServiceStatus::RequiresApproval) {
+            self.notify_approval_once(app);
+        }
+        (payload, changed)
+    }
+
+    pub fn refresh_service_state(&self, app: &AppHandle) -> AvailabilityPayload {
+        let (payload, changed) = self.store_service_state(app);
+        if changed {
+            sync_tray(app);
+        }
+        payload
+    }
+
     pub fn availability_payload(&self) -> AvailabilityPayload {
         let availability = self.bridge.availability();
         let service = (availability == DaemonAvailability::Unreachable && service::applicable())
@@ -223,6 +248,10 @@ pub fn on_menu(app: &AppHandle, id: &str) {
     match id {
         "open" => show_main(app),
         "quit" => app.exit(0),
+        APPROVE_SERVICE => {
+            service::open_login_items();
+            show_main(app);
+        }
         COPY_TUNNEL_IP => {
             let ip = app.state::<Ctx>().model().connected_tunnel_ip();
             if let Some(ip) = ip
@@ -330,8 +359,8 @@ pub fn refreshes_profiles(msg: &BridgeMsg) -> bool {
     matches!(msg, BridgeMsg::Event(Event::ProfilesChanged))
 }
 
-pub fn start_visible(tray_ok: bool, autostarted: bool) -> bool {
-    !tray_ok || !autostarted
+pub fn start_visible(tray_ok: bool, autostarted: bool, approval_pending: bool) -> bool {
+    !tray_ok || !autostarted || approval_pending
 }
 
 fn window_visible(app: &AppHandle) -> bool {
@@ -493,7 +522,7 @@ pub async fn consume(app: AppHandle, mut rx: UnboundedReceiver<BridgeMsg>) {
                 if !availability.is_available() {
                     ctx.subscribed.store(false, Ordering::SeqCst);
                 }
-                let payload = ctx.availability_payload();
+                let payload = ctx.refresh_service_state(&app);
                 let _ = app.emit(AVAILABILITY_CHANNEL, &payload);
                 if payload.status == DaemonStatus::NeedsSetup {
                     show_main(&app);
@@ -598,10 +627,11 @@ mod tests {
 
     #[test]
     fn only_autostart_with_a_tray_starts_hidden() {
-        assert!(!start_visible(true, true));
-        assert!(start_visible(false, true));
-        assert!(start_visible(true, false));
-        assert!(start_visible(false, false));
+        assert!(!start_visible(true, true, false));
+        assert!(start_visible(true, true, true));
+        assert!(start_visible(false, true, false));
+        assert!(start_visible(true, false, false));
+        assert!(start_visible(false, false, false));
     }
 
     #[test]

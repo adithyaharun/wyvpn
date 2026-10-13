@@ -249,18 +249,20 @@ pub fn open_support(app: AppHandle, target: String) -> CmdResult<Value> {
 }
 
 #[tauri::command]
-pub fn service_status() -> Option<ServiceStatus> {
-    service::applicable().then(service::status)
+pub fn service_status(ctx: State<'_, Ctx>, app: AppHandle) -> Option<ServiceStatus> {
+    let status = service::applicable().then(service::status);
+    ctx.refresh_service_state(&app);
+    status
 }
 
 #[tauri::command]
-pub async fn register_service() -> CmdResult<ServiceStatus> {
+pub async fn register_service(app: AppHandle) -> CmdResult<ServiceStatus> {
     if !service::applicable() {
         return Err(CmdError::invalid_request(
             "service setup is not needed here",
         ));
     }
-    tauri::async_runtime::spawn_blocking(|| {
+    let status = tauri::async_runtime::spawn_blocking(|| {
         let current = service::status();
         if !current.should_register() {
             return Ok(current);
@@ -269,7 +271,9 @@ pub async fn register_service() -> CmdResult<ServiceStatus> {
         Ok(service::status())
     })
     .await
-    .map_err(|_| CmdError::internal("service setup failed"))?
+    .map_err(|_| CmdError::internal("service setup failed"))?;
+    app.state::<Ctx>().refresh_service_state(&app);
+    status
 }
 
 #[tauri::command]

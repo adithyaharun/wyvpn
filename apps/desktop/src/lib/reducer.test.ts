@@ -42,6 +42,17 @@ describe("applyEvent", () => {
     expect(state.pendingCredentials).toBeNull();
   });
 
+  it("keeps the starting status while the service is unreachable", () => {
+    const state = applyEvent(initialState(), {
+      type: "availability",
+      available: false,
+      socket: "/run/w.sock",
+      status: "starting",
+    });
+    expect(state.available).toBe(false);
+    expect(state.status).toBe("starting");
+  });
+
   it("applies state_changed to an existing status", () => {
     const state = applyEvent(withData(), {
       type: "state_changed",

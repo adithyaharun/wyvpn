@@ -4,6 +4,7 @@
   import DaemonIncompatible from "$lib/components/DaemonIncompatible.svelte";
   import DaemonNotPermitted from "$lib/components/DaemonNotPermitted.svelte";
   import DaemonSetup from "$lib/components/DaemonSetup.svelte";
+  import DaemonStarting from "$lib/components/DaemonStarting.svelte";
   import DaemonUnavailable from "$lib/components/DaemonUnavailable.svelte";
   import DefaultProfileNotice from "$lib/components/DefaultProfileNotice.svelte";
   import ImportDialog from "$lib/components/ImportDialog.svelte";
@@ -63,6 +64,8 @@
     <DaemonNotPermitted />
   {:else if daemon.status === "needs_setup"}
     <DaemonSetup setup={daemon.setup} />
+  {:else if daemon.status === "starting"}
+    <DaemonStarting socket={daemon.socket} />
   {:else}
     <DaemonUnavailable socket={daemon.socket} />
   {/if}

@@ -12,6 +12,7 @@ pub enum Kind {
     Failed,
     PinNeeded,
     MissingDefault,
+    ApprovalNeeded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +53,14 @@ impl Notification {
             Kind::MissingDefault,
             "Auto-connect skipped",
             "The default profile no longer exists".to_owned(),
+        )
+    }
+
+    pub fn approval_needed() -> Self {
+        Self::new(
+            Kind::ApprovalNeeded,
+            "Approve WyVPN",
+            "Allow WyVPN in the background in System Settings to connect.".to_owned(),
         )
     }
 }
@@ -260,6 +269,17 @@ mod tests {
         ] {
             assert!(case.run(prev, &event).is_none());
         }
+    }
+
+    #[test]
+    fn approval_needed_points_at_system_settings() {
+        let note = Notification::approval_needed();
+        assert_eq!(note.kind, Kind::ApprovalNeeded);
+        assert_eq!(note.title, "Approve WyVPN");
+        assert_eq!(
+            note.body,
+            "Allow WyVPN in the background in System Settings to connect."
+        );
     }
 
     #[test]

@@ -1,0 +1,15 @@
+OPENVPN_VERSION=2.6.23
+OPENVPN_SOURCE_URL=https://github.com/OpenVPN/openvpn/releases/download/v2.6.23/openvpn-2.6.23.tar.gz
+OPENVPN_SOURCE_SHA256=4041c709162bec1325abf5aa8cf27a255cc477c634b15ee310411c701fc40a96
+OPENVPN_WINDOWS_MSI_URL=https://swupdate.openvpn.org/community/releases/OpenVPN-2.6.23-I002-amd64.msi
+OPENVPN_WINDOWS_MSI_SHA256=31809e97debe44c12be06ed892c2a43e55b67b31cb852827b7ec8f2d6c0b8dc6
+OPENVPN_WINDOWS_PUBLISHER="OpenVPN Inc."
+OPENSSL_VERSION=3.5.9
+OPENSSL_URL=https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz
+OPENSSL_SHA256=603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
+LZ4_VERSION=1.10.0
+LZ4_URL=https://github.com/lz4/lz4/releases/download/v1.10.0/lz4-1.10.0.tar.gz
+LZ4_SHA256=537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b
+LZO_VERSION=2.10
+LZO_URL=https://www.oberhumer.com/opensource/lzo/download/lzo-2.10.tar.gz
+LZO_SHA256=c0f892943208266f9b6543b3ae308fab6284c5c90e627931446fb49b4221a072

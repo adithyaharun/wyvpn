@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["app", "dmg"],
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "hardenedRuntime": true,
+      "entitlements": "../../../packaging/macos/entitlements.plist",
+      "files": {
+        "Library/LaunchDaemons/com.aprdth.wyvpn.daemon.plist": "../../../packaging/macos/com.aprdth.wyvpn.daemon.plist"
+      }
+    }
+  }
+}

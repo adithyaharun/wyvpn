@@ -1,0 +1,34 @@
+[package]
+name = "wyvpn-core"
+description = "Profile parsing, server API client and auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+live = []
+
+[dependencies]
+wyvpn-ipc.workspace = true
+base64.workspace = true
+crypto_box.workspace = true
+hmac.workspace = true
+reqwest.workspace = true
+rsa.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+url.workspace = true
+rustls-platform-verifier.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rcgen.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+wiremock.workspace = true

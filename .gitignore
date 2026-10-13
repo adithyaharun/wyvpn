@@ -1,0 +1,11 @@
+/target/
+.DS_Store
+node_modules/
+/.secrets/
+/openspec
+/notes
+/docs/*
+!/docs/release.md
+/apps/desktop/src-tauri/binaries/
+/apps/desktop/src-tauri/resources/THIRD_PARTY_LICENSES
+/apps/desktop/src-tauri/resources/openvpn-*/

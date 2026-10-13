@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Fragment>
+        <Property Id="REMOVEDATA" Secure="yes" />
+
+        <ComponentGroup Id="WyvpnComponents" Directory="INSTALLDIR">
+            <Component Id="WyvpnSystemPath" Guid="28bb9eb0-d61a-5216-a16a-03eb0a6280be">
+                <Environment Id="WyvpnSystemPathEntry" Name="PATH" Value="[INSTALLDIR]" Part="last" Action="set" System="yes" Permanent="no" />
+                <RegistryValue Root="HKLM" Key="Software\WyVPN" Name="SystemPath" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+            <Component Id="WyvpnSetupScript" Guid="fc200a80-bad4-5153-a924-0bfb77a8ed02">
+                <File Id="WyvpnSetupScript" Name="wyvpn-setup.ps1" Source="$(sys.SOURCEFILEDIR)wyvpn-setup.ps1" KeyPath="yes" />
+            </Component>
+        </ComponentGroup>
+
+        <CustomAction Id="WyvpnAskRemoveData" Script="jscript" Return="ignore"><![CDATA[
+var record = Session.Installer.CreateRecord(0);
+record.StringData(0) = "Also delete the stored VPN profiles and secrets? Choose No to keep them for a later reinstall.";
+if (Session.Message(0x03000124, record) == 6) {
+    Session.Property("REMOVEDATA") = "1";
+}
+]]></CustomAction>
+
+        <SetProperty Id="WyvpnInstall" Before="WyvpnInstall" Sequence="execute"
+                     Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLDIR]wyvpn-setup.ps1&quot; -Action Install" />
+        <CustomAction Id="WyvpnInstall" BinaryKey="WixCA" DllEntry="WixQuietExec64" Execute="deferred" Impersonate="no" Return="check" />
+
+        <SetProperty Action="SetWyvpnUninstallKeepData" Id="WyvpnUninstall" Before="WyvpnUninstall" Sequence="execute"
+                     Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLDIR]wyvpn-setup.ps1&quot; -Action Uninstall">NOT (REMOVEDATA="1")</SetProperty>
+        <SetProperty Action="SetWyvpnUninstallRemoveData" Id="WyvpnUninstall" Before="WyvpnUninstall" Sequence="execute"
+                     Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLDIR]wyvpn-setup.ps1&quot; -Action Uninstall -RemoveData">REMOVEDATA="1"</SetProperty>
+        <CustomAction Id="WyvpnUninstall" BinaryKey="WixCA" DllEntry="WixQuietExec64" Execute="deferred" Impersonate="no" Return="ignore" />
+
+        <InstallExecuteSequence>
+            <Custom Action="WyvpnAskRemoveData" After="InstallValidate">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE AND NOT REMOVEDATA AND UILevel &gt;= 3</Custom>
+            <Custom Action="WyvpnInstall" After="InstallFiles">NOT REMOVE</Custom>
+            <Custom Action="WyvpnUninstall" After="DeleteServices">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+        </InstallExecuteSequence>
+    </Fragment>
+</Wix>

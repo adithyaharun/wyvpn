@@ -1,0 +1,27 @@
+[package]
+name = "wyvpn-cli"
+description = "Command-line client for the WyVPN daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "wyvpn-cli"
+path = "src/main.rs"
+
+[dependencies]
+wyvpn-ipc.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+rpassword.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+rmcp = { workspace = true, features = ["client"] }
+tempfile.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "wyvpn-ipc"
+description = "Message types shared by the daemon, CLI and desktop app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+zeroize.workspace = true
+tokio = { workspace = true, features = ["net"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Pipes", "Win32_System_Services"] }

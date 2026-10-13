@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-register-service"
+description = "Enables the register_service command without any pre-configured scope."
+commands.allow = ["register_service"]
+
+[[permission]]
+identifier = "deny-register-service"
+description = "Denies the register_service command without any pre-configured scope."
+commands.deny = ["register_service"]

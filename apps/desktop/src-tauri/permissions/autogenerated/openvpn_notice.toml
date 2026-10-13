@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-openvpn-notice"
+description = "Enables the openvpn_notice command without any pre-configured scope."
+commands.allow = ["openvpn_notice"]
+
+[[permission]]
+identifier = "deny-openvpn-notice"
+description = "Denies the openvpn_notice command without any pre-configured scope."
+commands.deny = ["openvpn_notice"]

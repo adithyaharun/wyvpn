@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.aprdth.wyvpn.daemon</string>
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/wyvpnd</string>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>com.aprdth.wyvpn.app</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+</dict>
+</plist>

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-third-party-licenses"
+description = "Enables the third_party_licenses command without any pre-configured scope."
+commands.allow = ["third_party_licenses"]
+
+[[permission]]
+identifier = "deny-third-party-licenses"
+description = "Denies the third_party_licenses command without any pre-configured scope."
+commands.deny = ["third_party_licenses"]

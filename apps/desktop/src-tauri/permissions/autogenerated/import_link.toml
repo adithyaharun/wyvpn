@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-import-link"
+description = "Enables the import_link command without any pre-configured scope."
+commands.allow = ["import_link"]
+
+[[permission]]
+identifier = "deny-import-link"
+description = "Denies the import_link command without any pre-configured scope."
+commands.deny = ["import_link"]

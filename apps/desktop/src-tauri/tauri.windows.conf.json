@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["msi"],
+    "licenseFile": "../../../LICENSE.md",
+    "windows": {
+      "signCommand": {
+        "cmd": "powershell.exe",
+        "args": [
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "../../../scripts/windows-sign.ps1",
+          "-Phase",
+          "post",
+          "-Path",
+          "%1"
+        ]
+      },
+      "wix": {
+        "upgradeCode": "1098535d-278d-51d2-8b48-06955bb5803e",
+        "template": "../../../packaging/windows/main.wxs",
+        "fragmentPaths": ["../../../packaging/windows/wyvpn.wxs"],
+        "componentGroupRefs": ["WyvpnComponents"]
+      }
+    }
+  }
+}

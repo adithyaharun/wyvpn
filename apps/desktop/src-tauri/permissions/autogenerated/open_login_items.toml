@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-open-login-items"
+description = "Enables the open_login_items command without any pre-configured scope."
+commands.allow = ["open_login_items"]
+
+[[permission]]
+identifier = "deny-open-login-items"
+description = "Denies the open_login_items command without any pre-configured scope."
+commands.deny = ["open_login_items"]

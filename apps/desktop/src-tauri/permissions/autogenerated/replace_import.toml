@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-replace-import"
+description = "Enables the replace_import command without any pre-configured scope."
+commands.allow = ["replace_import"]
+
+[[permission]]
+identifier = "deny-replace-import"
+description = "Denies the replace_import command without any pre-configured scope."
+commands.deny = ["replace_import"]

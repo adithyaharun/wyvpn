@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "externalBin": ["binaries/wyvpnd", "binaries/wyvpn-cli"],
+    "resources": {
+      "resources/THIRD_PARTY_LICENSES": "THIRD_PARTY_LICENSES"
+    }
+  }
+}

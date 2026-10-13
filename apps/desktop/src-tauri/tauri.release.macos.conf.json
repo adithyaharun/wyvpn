@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "resources/openvpn-macos/openvpn": "openvpn/openvpn",
+      "resources/openvpn-macos/LICENSE": "openvpn/LICENSE",
+      "resources/openvpn-macos/COPYING": "openvpn/COPYING"
+    }
+  }
+}

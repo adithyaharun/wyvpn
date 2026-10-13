@@ -1,0 +1,215 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  BUN_VERSION: 1.3.14
+  CARGO_ABOUT_VERSION: 0.9.2
+
+jobs:
+  macos:
+    runs-on: macos-15
+    env:
+      APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+      APPLE_NOTARY_KEY: ${{ secrets.APPLE_API_KEY_P8 != '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun run version:check
+      - name: OpenVPN pin freshness
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/check-openvpn-update.sh
+      - name: Install cargo-about
+        run: command -v cargo-about || cargo install cargo-about --locked --features cli --version "$CARGO_ABOUT_VERSION"
+      - name: Cache OpenVPN build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: apps/desktop/src-tauri/resources/openvpn-macos
+          key: openvpn-macos-${{ hashFiles('packaging/openvpn/VERSION', 'scripts/build-openvpn-macos.sh') }}
+      - name: Import signing certificate
+        if: env.APPLE_SIGNING == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode >"$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+      - name: Write notarization key
+        if: env.APPLE_SIGNING == 'true' && env.APPLE_NOTARY_KEY == 'true'
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          umask 077
+          printf '%s' "$APPLE_API_KEY_P8" >"$RUNNER_TEMP/AuthKey.p8"
+          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >>"$GITHUB_ENV"
+      - name: Package
+        env:
+          WYVPN_TEAM_ID: ${{ env.APPLE_SIGNING == 'true' && (vars.APPLE_TEAM_ID || secrets.APPLE_TEAM_ID) || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING == 'true' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || secrets.APPLE_TEAM_ID }}
+        run: bun run package:macos
+      - name: Clean up signing material
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/AuthKey.p8"
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos
+          path: target/packaging/dist/*
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    env:
+      WINDOWS_SIGNING: ${{ secrets.WINDOWS_CERTIFICATE != '' || (vars.AZURE_TRUSTED_SIGNING_ENDPOINT != '' && vars.AZURE_TRUSTED_SIGNING_ACCOUNT != '' && vars.AZURE_CERTIFICATE_PROFILE != '' && vars.AZURE_CODESIGNING_DLIB != '') }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun run version:check
+      - name: Install cargo-about
+        run: command -v cargo-about || cargo install cargo-about --locked --features cli --version "$CARGO_ABOUT_VERSION"
+      - name: Package
+        env:
+          WYVPN_PUBLISHER: ${{ env.WINDOWS_SIGNING == 'true' && vars.WYVPN_PUBLISHER || '' }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          AZURE_CERTIFICATE_PROFILE: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
+          AZURE_CODESIGNING_DLIB: ${{ vars.AZURE_CODESIGNING_DLIB }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: bun run package:windows
+      - name: Sign MSI
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          AZURE_CERTIFICATE_PROFILE: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
+          AZURE_CODESIGNING_DLIB: ${{ vars.AZURE_CODESIGNING_DLIB }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: ./scripts/windows-sign.ps1 -Phase post -Path target/packaging/dist
+      - name: Label unsigned
+        shell: pwsh
+        run: |
+          foreach ($msi in Get-ChildItem target/packaging/dist/*.msi) {
+            if ((Get-AuthenticodeSignature -LiteralPath $msi.FullName).Status -ne 'Valid') {
+              Write-Output "::warning::$($msi.Name) is not signed"
+              Rename-Item -LiteralPath $msi.FullName ($msi.BaseName + '-unsigned.msi')
+            }
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows
+          path: target/packaging/dist/*
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf rpm
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun run version:check
+      - name: Install cargo-about
+        run: command -v cargo-about || cargo install cargo-about --locked --features cli --version "$CARGO_ABOUT_VERSION"
+      - run: bun run package:linux
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux
+          path: target/packaging/dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows, linux]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check tag matches version
+        run: |
+          source scripts/lib.sh
+          version="$(workspace_version)"
+          [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "::error::tag $GITHUB_REF_NAME does not match version $version"; exit 1; }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+      - name: OpenVPN corresponding source
+        run: scripts/fetch-openvpn-source.sh dist
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- * >SHA256SUMS
+          cat SHA256SUMS
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          unsigned=""
+          if compgen -G 'dist/*-unsigned.*' >/dev/null || compgen -G 'dist/*-unnotarized.*' >/dev/null; then
+            unsigned=$'\n\nSome installers in this release are not signed; their file names say so.'
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag \
+            --title "WyVPN ${GITHUB_REF_NAME#v}" \
+            --notes "Checksums are in SHA256SUMS. The corresponding OpenVPN source is attached as openvpn-<version>.tar.gz.$unsigned"

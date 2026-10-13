@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "wyvpn",
+  "bundle": {
+    "targets": [
+      "deb",
+      "rpm"
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "openvpn (>= 2.5)",
+          "libwebkit2gtk-4.1-0",
+          "libayatana-appindicator3-1"
+        ],
+        "files": {
+          "/usr/lib/systemd/system/wyvpnd.service": "../../../packaging/linux/wyvpnd.service",
+          "/usr/lib/sysusers.d/wyvpn.conf": "../../../packaging/linux/wyvpn.sysusers"
+        },
+        "postInstallScript": "../../../packaging/linux/postinst.sh",
+        "preRemoveScript": "../../../packaging/linux/prerm.sh",
+        "postRemoveScript": "../../../packaging/linux/postrm.sh",
+        "desktopTemplate": "../../../packaging/linux/wyvpn.desktop"
+      },
+      "rpm": {
+        "depends": [
+          "openvpn",
+          "webkit2gtk4.1",
+          "libayatana-appindicator-gtk3"
+        ],
+        "files": {
+          "/usr/lib/systemd/system/wyvpnd.service": "../../../packaging/linux/wyvpnd.service",
+          "/usr/lib/sysusers.d/wyvpn.conf": "../../../packaging/linux/wyvpn.sysusers"
+        },
+        "postInstallScript": "../../../packaging/linux/postinst.sh",
+        "preRemoveScript": "../../../packaging/linux/prerm.sh",
+        "postRemoveScript": "../../../packaging/linux/postrm.sh",
+        "desktopTemplate": "../../../packaging/linux/wyvpn.desktop"
+      }
+    }
+  }
+}

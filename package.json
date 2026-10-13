@@ -1,0 +1,19 @@
+{
+  "name": "wyvpn",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["apps/desktop"],
+  "scripts": {
+    "dev": "scripts/dev.sh",
+    "dev:daemon": "scripts/dev.sh --no-app",
+    "dev:app": "bun run --cwd apps/desktop tauri dev",
+    "cli": "WYVPN_SOCKET=${WYVPN_SOCKET:-/tmp/wyvpn.sock} ./target/debug/wyvpn-cli",
+    "build": "bun run --cwd apps/desktop tauri build",
+    "version:sync": "bun scripts/sync-version.ts",
+    "version:check": "bun scripts/sync-version.ts --check",
+    "licenses": "bash scripts/gen-licenses.sh",
+    "package:macos": "bash scripts/package.sh macos",
+    "package:windows": "bash scripts/package.sh windows",
+    "package:linux": "bash scripts/package.sh linux"
+  }
+}

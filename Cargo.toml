@@ -1,0 +1,59 @@
+[workspace]
+resolver = "3"
+members = ["apps/cli", "apps/daemon", "apps/desktop/src-tauri", "packages/*"]
+default-members = ["apps/cli", "apps/daemon", "packages/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+repository = "https://github.com/adithyaharun/wyvpn"
+
+[workspace.dependencies]
+wyvpn-core = { path = "packages/core" }
+wyvpn-ipc = { path = "packages/ipc" }
+
+anyhow = "1"
+nix = { version = "0.31", default-features = false, features = ["user", "fs", "hostname"] }
+rpassword = "7"
+rmcp = { version = "3.5", features = ["server", "macros", "transport-io"] }
+schemars = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "signal", "process", "sync", "time"] }
+tracing = "0.1"
+base64 = "0.23"
+crypto_box = "0.9"
+hmac = "0.12"
+proptest = "1"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rsa = { version = "0.9", features = ["sha2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+sha2 = "0.10"
+tar = "0.4"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+url = "2"
+rustls-platform-verifier = "0.7"
+wiremock = "0.6"
+zeroize = { version = "1", features = ["derive"] }
+windows-sys = { version = "0.61", features = ["Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Security_Cryptography_Catalog", "Win32_Security_Cryptography_Sip", "Win32_Security_WinTrust", "Win32_Foundation"] }
+windows-service = "0.8"
+security-framework-sys = "2"
+core-foundation-sys = "0.8"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
+
+# stripping proc-macro dylibs breaks them on macOS
+[profile.release.build-override]
+strip = false

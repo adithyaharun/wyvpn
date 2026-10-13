@@ -36,6 +36,7 @@
     "allow-open-login-items",
     "allow-third-party-licenses",
     "allow-openvpn-notice",
+    "allow-window-chrome",
     "clipboard-manager:allow-write-text"
   ]
 }

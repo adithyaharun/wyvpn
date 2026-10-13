@@ -17,6 +17,7 @@
   import Toolbar from "$lib/components/Toolbar.svelte";
   import { daemon } from "$lib/daemon.svelte";
   import { describeError } from "$lib/errors";
+  import { watchWindowChrome } from "$lib/window";
 
   type Panel = "import" | "settings" | "log" | "licenses";
   let panel = $state<Panel | null>(null);
@@ -34,6 +35,7 @@
 
   onMount(() => {
     const stop = daemon.start();
+    const stopChrome = watchWindowChrome();
     let unlisten: UnlistenFn | undefined;
     let disposed = false;
     listen("app://open-licenses", () => (panel = "licenses")).then((off) => {
@@ -43,6 +45,7 @@
     return () => {
       disposed = true;
       unlisten?.();
+      stopChrome();
       stop();
     };
   });

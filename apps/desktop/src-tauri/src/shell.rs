@@ -13,6 +13,7 @@ use wyvpn_ipc::{ConnectionState, ConnectionStatus, Event, ProfileSummary, Reques
 
 use crate::autoconnect::{self, Decision};
 use crate::bridge::{Bridge, BridgeMsg, DaemonAvailability, EventConfig};
+use crate::chrome;
 use crate::error::sanitize;
 use crate::model::{APPROVE_SERVICE, AvailabilityPayload, COPY_TUNNEL_IP, DaemonStatus, Model};
 use crate::notifications::{self, Kind, Notification};
@@ -28,6 +29,7 @@ pub const STATUSES_CHANNEL: &str = "daemon://statuses";
 pub const PROFILES_CHANNEL: &str = "daemon://profiles";
 #[cfg(target_os = "macos")]
 pub const LICENSES_CHANNEL: &str = "app://open-licenses";
+pub const WINDOW_CHROME_CHANNEL: &str = "app://window-chrome";
 pub const DEFAULT_MISSING_CHANNEL: &str = "app://default-profile-missing";
 const USER_DISCONNECT_WINDOW: Duration = Duration::from_secs(10);
 
@@ -227,7 +229,20 @@ pub fn show_main(app: &AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+    emit_window_chrome(app);
     tauri::async_runtime::spawn(refresh(app.clone()));
+}
+
+fn emit_window_chrome(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let chrome = handle
+            .get_webview_window(MAIN_WINDOW)
+            .and_then(|window| chrome::measure(&window));
+        if let Some(chrome) = chrome {
+            let _ = handle.emit(WINDOW_CHROME_CHANNEL, chrome);
+        }
+    });
 }
 
 #[cfg(target_os = "macos")]

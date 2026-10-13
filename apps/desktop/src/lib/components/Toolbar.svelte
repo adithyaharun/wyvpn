@@ -52,7 +52,7 @@
     align-items: center;
     gap: 8px;
     height: var(--toolbar);
-    padding: 0 8px 0 var(--toolbar-inset);
+    padding: var(--toolbar-pad-top, 0) 8px var(--toolbar-pad-bottom, 0) var(--toolbar-inset);
     background: var(--surface);
     cursor: default;
     user-select: none;

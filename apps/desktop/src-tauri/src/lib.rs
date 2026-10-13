@@ -1,6 +1,7 @@
 mod about;
 mod autoconnect;
 mod bridge;
+mod chrome;
 mod client;
 mod commands;
 mod error;
@@ -101,6 +102,7 @@ pub fn run() {
             commands::open_login_items,
             commands::third_party_licenses,
             commands::openvpn_notice,
+            commands::window_chrome,
         ])
         .on_window_event(|window, event| {
             if window.label() != MAIN_WINDOW {

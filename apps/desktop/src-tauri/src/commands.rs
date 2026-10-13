@@ -13,6 +13,7 @@ use tauri::path::BaseDirectory;
 
 use crate::about::{self, AppInfo, OpenVpnNotice, SupportTarget};
 use crate::bridge::SessionLogReply;
+use crate::chrome::{self, WindowChrome};
 use crate::error::CmdError;
 use crate::files::read_import_file;
 use crate::model::AvailabilityPayload;
@@ -274,6 +275,11 @@ pub async fn register_service(app: AppHandle) -> CmdResult<ServiceStatus> {
     .map_err(|_| CmdError::internal("service setup failed"))?;
     app.state::<Ctx>().refresh_service_state(&app);
     status
+}
+
+#[tauri::command]
+pub fn window_chrome(window: tauri::WebviewWindow) -> Option<WindowChrome> {
+    chrome::measure(&window)
 }
 
 #[tauri::command]

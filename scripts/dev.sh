@@ -48,7 +48,7 @@ case "$DATA_DIR" in
   *) die "WYVPN_DATA_DIR must be under /tmp for dev runs" ;;
 esac
 mkdir -p "$STATE_DIR"
-[ -O "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] || die "$STATE_DIR is not a directory you own"
+if [ ! -O "$STATE_DIR" ] || [ -L "$STATE_DIR" ]; then die "$STATE_DIR is not a directory you own"; fi
 chmod 700 "$STATE_DIR"
 
 install_root_copy() {

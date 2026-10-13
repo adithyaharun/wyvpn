@@ -42,6 +42,8 @@ enum Command {
 struct Task {
     commands: mpsc::UnboundedSender<Command>,
     handle: Option<JoinHandle<()>>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    reconnecting: Arc<AtomicBool>,
 }
 
 struct Slot {
@@ -71,6 +73,22 @@ impl Manager {
 
     fn slot(&self) -> MutexGuard<'_, Option<Slot>> {
         self.slot.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    pub fn close_if_restartable(&self, restart_reconnecting: bool) -> bool {
+        let slot = self.slot();
+        let restartable = slot.as_ref().is_none_or(|held| {
+            restart_reconnecting
+                && held
+                    .task
+                    .as_ref()
+                    .is_some_and(|task| task.reconnecting.load(Ordering::SeqCst))
+        });
+        if restartable {
+            self.closed.store(true, Ordering::SeqCst);
+        }
+        restartable
     }
 
     pub fn claim(
@@ -171,6 +189,7 @@ impl Manager {
         let (commands, inbox) = mpsc::unbounded_channel();
         let reconnect =
             held.auto_reconnect.unwrap_or(true) && !stored.profile.header.disable_reconnect;
+        let reconnecting = Arc::new(AtomicBool::new(false));
         let session = Session {
             state: Arc::clone(state),
             launcher: Arc::clone(&self.launcher),
@@ -179,8 +198,10 @@ impl Manager {
             pin,
             reconnect,
             commands: inbox,
+            reconnecting: Arc::clone(&reconnecting),
         };
         held.task = Some(Task {
+            reconnecting,
             commands,
             handle: Some(tokio::spawn(session.run())),
         });
@@ -319,6 +340,7 @@ struct Session {
     pin: Option<Zeroizing<String>>,
     reconnect: bool,
     commands: mpsc::UnboundedReceiver<Command>,
+    reconnecting: Arc<AtomicBool>,
 }
 
 struct EgressWatch {
@@ -471,7 +493,13 @@ impl Session {
         self.state.log(LogSource::Daemon, text);
     }
 
+    fn set_reconnecting(&self, value: bool) {
+        let _slot = self.state.sessions.slot();
+        self.reconnecting.store(value, Ordering::SeqCst);
+    }
+
     fn mark_reconnecting(&self) {
+        self.set_reconnecting(true);
         self.state
             .update(&self.stored.id, ConnectionState::Connecting, clear_link);
     }
@@ -548,6 +576,7 @@ impl Session {
                             "connected, tunnel address {}",
                             tunnel_ip.as_deref().unwrap_or("unknown")
                         ));
+                        self.set_reconnecting(false);
                         self.state.update(&id, ConnectionState::Connected, |status| {
                             status.tunnel_ip = tunnel_ip;
                             status.server_endpoint = remote;
@@ -1604,5 +1633,65 @@ mod tests {
         assert!(matches!(outcome, Outcome::Result(Response::Profile { .. })));
         assert_eq!(rig.status(A).profile_name, "Home");
         assert_eq!(rig.status(A).state, ConnectionState::Connected);
+    }
+
+    #[test]
+    fn an_empty_manager_is_restartable_and_closes() {
+        let rig = Rig::new(&[]);
+        assert!(rig.state.sessions.close_if_restartable(true));
+        let error = rig
+            .state
+            .sessions
+            .claim(A, Transport::OpenVpn, None)
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidState);
+        assert!(error.message.contains("shutting down"));
+    }
+
+    #[test]
+    fn waiting_for_credentials_is_not_restartable() {
+        let rig = Rig::new(&[]);
+        rig.state
+            .sessions
+            .claim(A, Transport::OpenVpn, None)
+            .unwrap();
+        assert!(!rig.state.sessions.close_if_restartable(true));
+        assert!(!rig.state.sessions.closed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_initial_connect_and_a_live_tunnel_are_not_restartable() {
+        let mut rig = Rig::new(&[]);
+        let process = rig.launch(A).await;
+        assert!(!rig.state.sessions.close_if_restartable(true));
+        process.send(connected()).await;
+        rig.until(ConnectionState::Connected).await;
+        assert!(!rig.state.sessions.close_if_restartable(true));
+        assert!(!rig.state.sessions.closed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reconnecting_session_is_restartable() {
+        let mut rig = Rig::new(&[]);
+        let process = rig.connected(A).await;
+        process.send(TunnelEvent::Exited(Some(1))).await;
+        rig.until(ConnectionState::Connecting).await;
+        assert!(!rig.state.sessions.close_if_restartable(false));
+        assert!(!rig.state.sessions.closed.load(Ordering::SeqCst));
+        assert!(rig.state.sessions.close_if_restartable(true));
+        assert!(rig.state.sessions.closed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reconnected_session_is_not_restartable() {
+        let mut rig = Rig::new(&[]);
+        let process = rig.connected(A).await;
+        process.send(TunnelEvent::Exited(Some(1))).await;
+        rig.until(ConnectionState::Connecting).await;
+        let relaunched = rig.launches.recv().await.unwrap();
+        relaunched.send(connected()).await;
+        rig.until(ConnectionState::Connected).await;
+        assert!(!rig.state.sessions.close_if_restartable(true));
+        assert!(!rig.state.sessions.closed.load(Ordering::SeqCst));
     }
 }

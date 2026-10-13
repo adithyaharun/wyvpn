@@ -54,6 +54,9 @@ impl AvailabilityPayload {
         let pending_setup = service.filter(|status| *status != ServiceStatus::Enabled);
         let (status, mismatch, setup) = match availability {
             DaemonAvailability::Available => (DaemonStatus::Available, None, None),
+            DaemonAvailability::Outdated(mismatch) => {
+                (DaemonStatus::Available, Some(mismatch.clone()), None)
+            }
             DaemonAvailability::Incompatible(mismatch) => {
                 (DaemonStatus::Incompatible, Some(mismatch.clone()), None)
             }
@@ -633,5 +636,18 @@ mod tests {
         assert_eq!(mismatch["status"], "incompatible");
         assert_eq!(mismatch["mismatch"]["daemon_version"], "0.0.9");
         assert!(mismatch.get("setup").is_none());
+        let outdated = json(
+            DaemonAvailability::Outdated(Mismatch::outdated("0.0.9")),
+            None,
+        );
+        assert_eq!(outdated["status"], "available");
+        assert_eq!(outdated["available"], true);
+        assert_eq!(outdated["mismatch"]["daemon_version"], "0.0.9");
+        assert_eq!(
+            outdated["mismatch"]["daemon_protocol"],
+            wyvpn_ipc::PROTOCOL_VERSION
+        );
+        assert_eq!(outdated["mismatch"]["client_version"], wyvpn_ipc::VERSION);
+        assert!(outdated.get("setup").is_none());
     }
 }

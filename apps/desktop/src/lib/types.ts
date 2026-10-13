@@ -56,7 +56,13 @@ export interface ConnectionStatus {
   awaiting?: AuthMode;
 }
 
-export type DaemonStatus = "available" | "unreachable" | "incompatible" | "not_permitted" | "needs_setup";
+export type DaemonStatus =
+  | "available"
+  | "unreachable"
+  | "starting"
+  | "incompatible"
+  | "not_permitted"
+  | "needs_setup";
 
 export type ServiceStatus = "not_registered" | "enabled" | "requires_approval" | "not_found";
 

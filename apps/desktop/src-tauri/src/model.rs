@@ -8,6 +8,7 @@ use crate::error::sanitize;
 use crate::service::ServiceStatus;
 
 pub const COPY_TUNNEL_IP: &str = "copy_tunnel_ip";
+pub const APPROVE_SERVICE: &str = "approve_service";
 const MENU_NAME_CHARS: usize = 40;
 
 #[derive(Debug, Default, Clone)]
@@ -17,13 +18,17 @@ pub struct Model {
     pub statuses: Vec<ConnectionStatus>,
     pub profiles_loaded: bool,
     pub statuses_loaded: bool,
+    pub daemon_status: DaemonStatus,
+    pub setup: Option<ServiceStatus>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DaemonStatus {
     Available,
+    #[default]
     Unreachable,
+    Starting,
     Incompatible,
     NotPermitted,
     NeedsSetup,
@@ -53,9 +58,10 @@ impl AvailabilityPayload {
                 (DaemonStatus::Incompatible, Some(mismatch.clone()), None)
             }
             DaemonAvailability::NotPermitted => (DaemonStatus::NotPermitted, None, None),
-            DaemonAvailability::Unreachable => match pending_setup {
-                Some(status) => (DaemonStatus::NeedsSetup, None, Some(status)),
-                None => (DaemonStatus::Unreachable, None, None),
+            DaemonAvailability::Unreachable => match (service, pending_setup) {
+                (_, Some(status)) => (DaemonStatus::NeedsSetup, None, Some(status)),
+                (Some(_), None) => (DaemonStatus::Starting, None, None),
+                (None, None) => (DaemonStatus::Unreachable, None, None),
             },
         };
         Self {
@@ -87,6 +93,18 @@ pub enum Entry {
 }
 
 impl Model {
+    pub fn approval_pending(&self) -> bool {
+        self.daemon_status == DaemonStatus::NeedsSetup
+            && self.setup == Some(ServiceStatus::RequiresApproval)
+    }
+
+    pub fn set_daemon_state(&mut self, payload: &AvailabilityPayload) -> bool {
+        let changed = self.daemon_status != payload.status || self.setup != payload.setup;
+        self.daemon_status = payload.status;
+        self.setup = payload.setup;
+        changed
+    }
+
     pub fn apply(&mut self, msg: &BridgeMsg) {
         match msg {
             BridgeMsg::Subscribed => {}
@@ -233,7 +251,12 @@ impl Model {
 
     fn state_line(&self) -> String {
         if !self.available {
-            return "Service not running".to_owned();
+            return match self.daemon_status {
+                DaemonStatus::Starting => "Service starting…",
+                DaemonStatus::NeedsSetup if self.approval_pending() => "Approval needed",
+                _ => "Service not running",
+            }
+            .to_owned();
         }
         let Some(active) = self.active() else {
             return "Disconnected".to_owned();
@@ -253,6 +276,13 @@ impl Model {
 
     pub fn menu_entries(&self) -> Vec<Entry> {
         let mut entries = vec![Entry::Info(self.state_line())];
+        if self.approval_pending() {
+            entries.push(Entry::Action {
+                id: APPROVE_SERVICE.to_owned(),
+                label: "Approve Background Service…".to_owned(),
+                enabled: true,
+            });
+        }
         if self.connected_tunnel_ip().is_some() {
             entries.push(Entry::Action {
                 id: COPY_TUNNEL_IP.to_owned(),
@@ -360,6 +390,66 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn approval_entry_shows_only_while_approval_is_pending() {
+        let has_approval = |model: &Model| {
+            model
+                .menu_entries()
+                .iter()
+                .any(|entry| matches!(entry, Entry::Action { id, .. } if id == APPROVE_SERVICE))
+        };
+        let mut model = model();
+        assert!(!has_approval(&model));
+        model.available = false;
+        model.daemon_status = DaemonStatus::NeedsSetup;
+        model.setup = Some(ServiceStatus::NotRegistered);
+        assert!(!has_approval(&model));
+        model.setup = Some(ServiceStatus::RequiresApproval);
+        assert!(has_approval(&model));
+        assert_eq!(
+            model.menu_entries()[1],
+            Entry::Action {
+                id: APPROVE_SERVICE.into(),
+                label: "Approve Background Service…".into(),
+                enabled: true,
+            }
+        );
+    }
+
+    #[test]
+    fn state_line_reflects_the_daemon_status_when_unavailable() {
+        let mut model = Model::default();
+        let line = |model: &Model| model.menu_entries()[0].clone();
+        assert_eq!(line(&model), Entry::Info("Service not running".into()));
+        model.daemon_status = DaemonStatus::Starting;
+        assert_eq!(line(&model), Entry::Info("Service starting…".into()));
+        model.daemon_status = DaemonStatus::NeedsSetup;
+        model.setup = Some(ServiceStatus::NotRegistered);
+        assert_eq!(line(&model), Entry::Info("Service not running".into()));
+        model.setup = Some(ServiceStatus::RequiresApproval);
+        assert_eq!(line(&model), Entry::Info("Approval needed".into()));
+    }
+
+    #[test]
+    fn daemon_state_change_is_reported_once() {
+        let mut model = Model::default();
+        let payload = AvailabilityPayload::new(
+            "/s",
+            &DaemonAvailability::Unreachable,
+            Some(ServiceStatus::RequiresApproval),
+        );
+        assert!(model.set_daemon_state(&payload));
+        assert!(model.approval_pending());
+        assert!(!model.set_daemon_state(&payload));
+        let enabled = AvailabilityPayload::new(
+            "/s",
+            &DaemonAvailability::Unreachable,
+            Some(ServiceStatus::Enabled),
+        );
+        assert!(model.set_daemon_state(&enabled));
+        assert!(!model.approval_pending());
     }
 
     #[test]
@@ -510,12 +600,16 @@ mod tests {
             serde_json::json!({"available": false, "socket": "/s", "status": "unreachable"})
         );
         assert_eq!(
-            json(
-                DaemonAvailability::Unreachable,
-                Some(ServiceStatus::Enabled)
-            )["status"],
+            json(DaemonAvailability::Unreachable, None)["status"],
             "unreachable"
         );
+        let starting = json(
+            DaemonAvailability::Unreachable,
+            Some(ServiceStatus::Enabled),
+        );
+        assert_eq!(starting["status"], "starting");
+        assert_eq!(starting["available"], false);
+        assert!(starting.get("setup").is_none());
         let setup = json(
             DaemonAvailability::Unreachable,
             Some(ServiceStatus::RequiresApproval),

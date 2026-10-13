@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/svelte";
+import { fireEvent, render, screen } from "@testing-library/svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.hoisted(() => vi.fn());
@@ -43,6 +43,22 @@ describe("DaemonSetup", () => {
 
     expect(await screen.findByText("Approved. Starting the service…")).toBeInTheDocument();
     expect(invoke).toHaveBeenCalledWith("daemon_state", undefined);
+    expect(invoke).not.toHaveBeenCalledWith("register_service", undefined);
+  });
+
+  it("explains the one-time approval and opens Login Items", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "service_status") return "requires_approval";
+      return null;
+    });
+    render(DaemonSetup, { setup: "requires_approval" });
+
+    expect(screen.getByText(/macOS asks only once/)).toHaveTextContent("runs for all users of this Mac");
+    expect(screen.getByText(/If you dismissed the macOS prompt/)).toHaveTextContent(
+      "Allow in the Background in System Settings",
+    );
+    await fireEvent.click(screen.getByRole("button", { name: "Open System Settings" }));
+    expect(invoke).toHaveBeenCalledWith("open_login_items", undefined);
     expect(invoke).not.toHaveBeenCalledWith("register_service", undefined);
   });
 

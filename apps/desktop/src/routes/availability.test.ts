@@ -102,6 +102,14 @@ describe("daemon availability screens", () => {
     expect(await screen.findByText("WyVPN service isn't running")).toBeInTheDocument();
   });
 
+  it("shows the starting screen while an approved service comes up", async () => {
+    backend({ available: false, socket: "/s", status: "starting" });
+    render(Page);
+
+    expect(await screen.findByText("Starting the WyVPN service…")).toBeInTheDocument();
+    expect(screen.queryByText("WyVPN service isn't running")).not.toBeInTheDocument();
+  });
+
   it("switches screens when an availability event arrives", async () => {
     backend({ available: false, socket: "/s" });
     render(Page);

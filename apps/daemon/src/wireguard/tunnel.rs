@@ -10,8 +10,8 @@ use super::dnsctl::{DnsControl, tunnel_dns};
 use super::exec::SystemExec;
 use super::netops::{Platform, Programs, RouteEntry, RouteOps, SystemNet, Via};
 use super::routes::{
-    allowed_ips, already_present, bypass_entry, is_critical, needs_bypass, split_defaults,
-    tunnel_entries,
+    allowed_ips, already_present, bypass_entry, ensure_reachable, is_critical, needs_bypass,
+    split_defaults, tunnel_entries,
 };
 use super::state::StateStore;
 use super::userspace::UserspaceBackend;
@@ -52,6 +52,7 @@ pub struct Tunnel {
     dns: Box<dyn DnsControl>,
     store: StateStore,
     interface: String,
+    endpoint: SocketAddr,
     installed: Vec<RouteEntry>,
     dns_applied: bool,
     finished: bool,
@@ -72,10 +73,11 @@ impl Tunnel {
         } = parts;
 
         let endpoint = resolve(&config.endpoint()).context("cannot resolve the server address")?;
-        let allowed = allowed_ips(&config.routes, &config.routes6);
+        let mut allowed = allowed_ips(&config.routes, &config.routes6);
         for (network, reason) in &allowed.skipped {
             tracing::warn!(%network, %reason, "skipping a route from the server");
         }
+        ensure_reachable(&mut allowed.networks, config.gateway.into());
         let tunnel_networks = split_defaults(&allowed.networks);
         let bypass = if needs_bypass(&tunnel_networks, endpoint.ip()) {
             let via = routes
@@ -108,6 +110,7 @@ impl Tunnel {
             dns,
             store,
             interface,
+            endpoint,
             installed: Vec::new(),
             dns_applied: false,
             finished: false,
@@ -157,6 +160,10 @@ impl Tunnel {
 
     pub fn backend(&self) -> SharedBackend {
         self.backend.clone()
+    }
+
+    pub fn endpoint(&self) -> SocketAddr {
+        self.endpoint
     }
 
     pub fn interface(&self) -> &str {
@@ -220,7 +227,6 @@ mod tests {
     struct Rig {
         net: FakeNet,
         dns: FakeDns,
-        backend: Handle,
         data: tempfile::TempDir,
     }
 
@@ -229,7 +235,6 @@ mod tests {
             Self {
                 net: FakeNet::with_gateway("192.168.1.1", "en0"),
                 dns: FakeDns::default(),
-                backend: Handle::default(),
                 data: tempfile::tempdir().unwrap(),
             }
         }
@@ -325,6 +330,28 @@ mod tests {
                 "add 8000::/1 dev fake0",
             ]
         );
+    }
+
+    #[test]
+    fn an_uncovered_gateway_gets_its_own_route_and_allowed_ip() {
+        let rig = Rig::new();
+        let mut cfg = config();
+        cfg.routes = vec![route("192.168.0.0/16")];
+        let (tunnel, backend) = up(&rig, &cfg);
+        let _tunnel = tunnel.unwrap();
+        assert_eq!(
+            rig.net.log(),
+            [
+                "add 192.168.0.0/16 dev fake0",
+                "add 10.200.0.1/32 dev fake0"
+            ]
+        );
+        backend.with(|record| {
+            assert_eq!(
+                record.configs[0].allowed_ips,
+                [cidr("192.168.0.0/16"), cidr("10.200.0.1/32")]
+            );
+        });
     }
 
     #[test]

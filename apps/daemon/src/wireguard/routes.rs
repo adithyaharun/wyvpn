@@ -95,6 +95,13 @@ pub fn allowed_ips(routes: &[Route], routes6: &[Route]) -> Allowed {
     allowed
 }
 
+pub fn ensure_reachable(networks: &mut Vec<Cidr>, host: IpAddr) {
+    if !networks.iter().any(|network| contains(*network, host)) {
+        let prefix = if host.is_ipv4() { 32 } else { 128 };
+        networks.push(Cidr { addr: host, prefix });
+    }
+}
+
 pub fn split_defaults(networks: &[Cidr]) -> Vec<Cidr> {
     let mut split = Vec::with_capacity(networks.len());
     let mut push = |network: Cidr| {
@@ -229,6 +236,20 @@ mod tests {
                 (cidr("::/16"), SkipReason::Unspecified),
             ]
         );
+    }
+
+    #[test]
+    fn the_gateway_is_added_only_when_no_route_covers_it() {
+        let gateway = ip("10.200.0.1");
+        let mut covered = vec![cidr("10.0.0.0/8")];
+        ensure_reachable(&mut covered, gateway);
+        assert_eq!(covered, [cidr("10.0.0.0/8")]);
+        let mut bare = vec![cidr("192.168.0.0/16")];
+        ensure_reachable(&mut bare, gateway);
+        assert_eq!(bare, [cidr("192.168.0.0/16"), cidr("10.200.0.1/32")]);
+        let mut empty = Vec::new();
+        ensure_reachable(&mut empty, ip("fd00::1"));
+        assert_eq!(empty, [cidr("fd00::1/128")]);
     }
 
     #[test]

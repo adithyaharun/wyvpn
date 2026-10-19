@@ -8,12 +8,12 @@ use wyvpn_core::wireguard::{Endpoint, Host, WireGuardConfig, WireGuardKeys};
 use super::backend::{BackendConfig, SharedBackend, WgBackend, resolve_endpoint};
 use super::dnsctl::{DnsControl, tunnel_dns};
 use super::exec::SystemExec;
-use super::netops::{Platform, Programs, RouteEntry, RouteOps, SystemNet, Via};
+use super::netops::{Platform, Programs, RouteEntry, RouteOps, SystemNet};
 use super::routes::{
-    allowed_ips, already_present, bypass_entry, ensure_reachable, is_critical, needs_bypass,
-    split_defaults, tunnel_entries,
+    allowed_ips, already_present, bypass_entry, ensure_reachable, ipv6_unavailable, is_critical,
+    needs_bypass, split_defaults, tunnel_entries, without_host,
 };
-use super::state::StateStore;
+use super::state::{StateStore, recover_routes};
 use super::userspace::UserspaceBackend;
 
 pub type Resolver = Box<dyn Fn(&Endpoint) -> io::Result<SocketAddr> + Send>;
@@ -78,8 +78,9 @@ impl Tunnel {
             tracing::warn!(%network, %reason, "skipping a route from the server");
         }
         ensure_reachable(&mut allowed.networks, config.gateway.into());
-        let tunnel_networks = split_defaults(&allowed.networks);
+        let mut tunnel_networks = split_defaults(&allowed.networks);
         let bypass = if needs_bypass(&tunnel_networks, endpoint.ip()) {
+            without_host(&mut tunnel_networks, endpoint.ip());
             let via = routes
                 .route_to(endpoint.ip())
                 .context("cannot find the current route to the server")?;
@@ -87,6 +88,8 @@ impl Tunnel {
         } else {
             None
         };
+
+        recover_routes(&store, routes.as_mut(), Platform::current());
 
         let backend_config = BackendConfig {
             address: config.address,
@@ -116,14 +119,11 @@ impl Tunnel {
             finished: false,
         };
 
-        let mut entries: Vec<RouteEntry> = bypass.into_iter().collect();
-        entries.extend(tunnel_entries(&tunnel_networks, &tunnel.interface));
-        tunnel
-            .store
-            .save(&tunnel.interface, &entries)
-            .context("cannot record the tunnel state")?;
-        for entry in entries {
-            tunnel.install(entry)?;
+        if let Some(entry) = bypass {
+            tunnel.install(entry, true)?;
+        }
+        for entry in tunnel_entries(&tunnel_networks, &tunnel.interface) {
+            tunnel.install(entry, false)?;
         }
 
         let dns_config = tunnel_dns(config);
@@ -136,23 +136,34 @@ impl Tunnel {
         Ok(tunnel)
     }
 
-    fn install(&mut self, entry: RouteEntry) -> anyhow::Result<()> {
-        let is_bypass = matches!(entry.via, Via::Gateway { .. });
-        let critical = is_bypass || is_critical(entry.network);
+    fn persist(&self, pending: Option<&RouteEntry>) -> anyhow::Result<()> {
+        let mut entries = self.installed.clone();
+        entries.extend(pending.cloned());
+        self.store
+            .save(&self.interface, &entries)
+            .context("cannot record the tunnel state")
+    }
+
+    fn install(&mut self, entry: RouteEntry, bypass: bool) -> anyhow::Result<()> {
+        let critical = bypass || is_critical(entry.network);
+        self.persist(Some(&entry))?;
         match self.routes.add_route(&entry) {
             Ok(()) => self.installed.push(entry),
-            Err(err) if is_bypass && already_present(&err) => {
+            Err(err) if bypass && already_present(&err) => {
                 tracing::debug!(network = %entry.network, "route to the server already present");
+                self.persist(None)?;
             }
-            Err(err) if critical => {
+            Err(err) if critical && !(entry.network.addr.is_ipv6() && ipv6_unavailable(&err)) => {
                 return Err(anyhow::Error::new(err)
                     .context(format!("cannot install the route {}", entry.network)));
             }
-            Err(err) if already_present(&err) => {
-                tracing::debug!(network = %entry.network, "route already present");
-            }
             Err(err) => {
-                tracing::warn!(%err, network = %entry.network, "cannot install a route");
+                if already_present(&err) {
+                    tracing::debug!(network = %entry.network, "route already present");
+                } else {
+                    tracing::warn!(%err, network = %entry.network, "cannot install a route");
+                }
+                self.persist(None)?;
             }
         }
         Ok(())
@@ -221,6 +232,7 @@ mod tests {
     use super::*;
     use crate::wireguard::backend::fake::{self, Handle};
     use crate::wireguard::dnsctl::fake::FakeDns;
+    use crate::wireguard::netops::Via;
     use crate::wireguard::netops::fake::FakeNet;
     use crate::wireguard::testutil::{config, route};
 
@@ -528,6 +540,118 @@ mod tests {
         assert!(err.contains("interface"));
         assert!(rig.record().exists());
         std::mem::forget(tunnel);
+    }
+
+    #[test]
+    fn halves_pushed_by_the_server_are_installed_not_skipped() {
+        let rig = Rig::new();
+        let mut cfg = config();
+        cfg.routes = vec![route("0.0.0.0/1"), route("128.0.0.0/1")];
+        cfg.routes6 = vec![route("::/1"), route("8000::/1")];
+        let (tunnel, _) = up(&rig, &cfg);
+        let _tunnel = tunnel.unwrap();
+        let log = rig.net.log();
+        for half in ["0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"] {
+            assert!(log.contains(&format!("add {half} dev fake0")), "{half}");
+        }
+    }
+
+    #[test]
+    fn ipv6_routes_are_optional_when_the_host_has_no_ipv6() {
+        let rig = Rig::new();
+        rig.net.lock().fail_add_with = vec![
+            (
+                "::/1".into(),
+                "RTNETLINK answers: Address family not supported by protocol".into(),
+            ),
+            (
+                "8000::/1".into(),
+                "RTNETLINK answers: Operation not supported".into(),
+            ),
+        ];
+        let mut cfg = config();
+        cfg.routes = vec![route("10.0.0.0/8")];
+        cfg.routes6 = vec![route("::/0")];
+        let (tunnel, _) = up(&rig, &cfg);
+        let mut tunnel = tunnel.unwrap();
+        tunnel.tear_down().unwrap();
+        assert!(
+            !rig.net
+                .log()
+                .iter()
+                .any(|line| line.starts_with("del ::/1"))
+        );
+
+        let rig = Rig::new();
+        rig.net.lock().fail_add_with = vec![("::/1".into(), "permission denied".into())];
+        let (tunnel, _) = up(&rig, &cfg);
+        assert!(tunnel.is_err());
+    }
+
+    #[test]
+    fn an_on_link_bypass_is_just_as_critical() {
+        let rig = Rig::new();
+        rig.net.lock().via = Some(Via::Interface("en0".into()));
+        rig.net.lock().fail_add = vec!["203.0.113.9/32".into()];
+        let mut cfg = config();
+        cfg.routes = vec![route("0.0.0.0/0")];
+        let (tunnel, backend) = up(&rig, &cfg);
+        assert!(tunnel.is_err());
+        backend.with(|record| assert_eq!(record.downs, 1));
+    }
+
+    #[test]
+    fn the_endpoint_route_is_installed_once_even_if_the_server_lists_it() {
+        let rig = Rig::new();
+        let mut cfg = config();
+        cfg.routes = vec![route("0.0.0.0/0"), route("203.0.113.9/32")];
+        let (tunnel, _) = up(&rig, &cfg);
+        let _tunnel = tunnel.unwrap();
+        let adds = rig
+            .net
+            .log()
+            .iter()
+            .filter(|line| line.contains("203.0.113.9/32"))
+            .count();
+        assert_eq!(adds, 1);
+    }
+
+    #[test]
+    fn the_state_record_holds_only_routes_that_were_installed() {
+        let rig = Rig::new();
+        rig.net.lock().fail_add = vec!["10.0.0.0/8".into()];
+        let mut cfg = config();
+        cfg.routes = vec![route("10.0.0.0/8"), route("172.16.0.0/12")];
+        let (tunnel, _) = up(&rig, &cfg);
+        let _tunnel = tunnel.unwrap();
+        let text = std::fs::read_to_string(rig.record()).unwrap();
+        assert!(text.contains("172.16.0.0/12"));
+        assert!(!text.contains("10.0.0.0/8"));
+    }
+
+    #[test]
+    fn a_leftover_record_is_recovered_before_the_new_tunnel_starts() {
+        let rig = Rig::new();
+        StateStore::new(rig.data.path())
+            .save(
+                "wyvpn9",
+                &[RouteEntry {
+                    network: cidr("198.51.100.0/24"),
+                    via: Via::Gateway {
+                        gateway: "192.168.1.1".parse().unwrap(),
+                        dev: "en0".into(),
+                    },
+                }],
+            )
+            .unwrap();
+        let mut cfg = config();
+        cfg.routes = vec![route("10.0.0.0/8")];
+        let (tunnel, _) = up(&rig, &cfg);
+        let _tunnel = tunnel.unwrap();
+        let log = rig.net.log();
+        assert_eq!(log[0], "del 198.51.100.0/24 via 192.168.1.1 dev en0");
+        let text = std::fs::read_to_string(rig.record()).unwrap();
+        assert!(text.contains("fake0") && !text.contains("198.51.100.0"));
     }
 
     #[test]

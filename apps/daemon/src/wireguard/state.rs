@@ -116,28 +116,30 @@ impl StateStore {
     }
 }
 
-pub fn recover_with(store: &StateStore, net: &mut (impl RouteOps + LinkOps), platform: Platform) {
+pub fn recover_routes(
+    store: &StateStore,
+    routes: &mut dyn RouteOps,
+    platform: Platform,
+) -> Option<String> {
     let saved = match store.load() {
         Ok(Some(saved)) => saved,
-        Ok(None) => return,
+        Ok(None) => return None,
         Err(err) => {
             tracing::warn!(%err, "discarding the wireguard state record");
             if let Err(err) = store.clear() {
                 tracing::warn!(%err, "cannot remove the wireguard state record");
             }
-            return;
+            return None;
         }
     };
     for route in saved.routes.iter().rev() {
-        if let Err(err) = net.delete_route(route) {
+        let kernel_owned = platform == Platform::MacOs && matches!(route.via, Via::Interface(_));
+        if kernel_owned {
+            continue;
+        }
+        if let Err(err) = routes.delete_route(route) {
             tracing::debug!(%err, network = %route.network, "stale route already gone");
         }
-    }
-    if platform == Platform::Linux
-        && is_own_linux_interface(&saved.interface)
-        && let Err(err) = net.remove_link(&saved.interface)
-    {
-        tracing::debug!(%err, "stale interface already gone");
     }
     if let Err(err) = store.clear() {
         tracing::warn!(%err, "cannot remove the wireguard state record");
@@ -146,6 +148,19 @@ pub fn recover_with(store: &StateStore, net: &mut (impl RouteOps + LinkOps), pla
         routes = saved.routes.len(),
         "removed wireguard routes left by a previous run"
     );
+    Some(saved.interface)
+}
+
+pub fn recover_with(store: &StateStore, net: &mut (impl RouteOps + LinkOps), platform: Platform) {
+    let Some(interface) = recover_routes(store, net, platform) else {
+        return;
+    };
+    if platform == Platform::Linux
+        && is_own_linux_interface(&interface)
+        && let Err(err) = net.remove_link(&interface)
+    {
+        tracing::debug!(%err, "stale interface already gone");
+    }
 }
 
 pub fn recover(data_dir: &Path) {
@@ -259,7 +274,7 @@ mod tests {
         let store = StateStore::new(dir.path());
         store.save("utun4", &entries()).unwrap();
         let mut net = FakeNet::default();
-        recover_with(&store, &mut net, Platform::MacOs);
+        recover_with(&store, &mut net, Platform::Linux);
         assert_eq!(
             net.log(),
             [
@@ -268,6 +283,16 @@ mod tests {
             ]
         );
         assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn macos_recovery_leaves_kernel_owned_interface_routes_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        store.save("utun4", &entries()).unwrap();
+        let mut net = FakeNet::default();
+        recover_with(&store, &mut net, Platform::MacOs);
+        assert_eq!(net.log(), ["del 203.0.113.9/32 via 192.168.1.1 dev en0"]);
     }
 
     #[test]
@@ -297,7 +322,7 @@ mod tests {
         store.save("utun4", &entries()).unwrap();
         let mut net = FakeNet::default();
         net.lock().fail_delete = true;
-        recover_with(&store, &mut net, Platform::MacOs);
+        recover_with(&store, &mut net, Platform::Linux);
         assert_eq!(net.log().len(), 2);
         assert_eq!(store.load().unwrap(), None);
     }

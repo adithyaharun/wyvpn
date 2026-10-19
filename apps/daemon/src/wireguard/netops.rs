@@ -490,7 +490,13 @@ fn parse_linux(output: &str) -> Option<Via> {
     let mut dev = None;
     while let Some(token) = tokens.next() {
         match token {
-            "via" => gateway = tokens.next().and_then(clean_gateway),
+            "via" => {
+                let mut next = tokens.next();
+                if matches!(next, Some("inet" | "inet6")) {
+                    next = tokens.next();
+                }
+                gateway = next.and_then(clean_gateway);
+            }
             "dev" => dev = tokens.next().map(str::to_owned),
             _ => {}
         }
@@ -666,6 +672,7 @@ pub mod fake {
         pub log: Vec<String>,
         pub via: Option<Via>,
         pub fail_add: Vec<String>,
+        pub fail_add_with: Vec<(String, String)>,
         pub fail_delete: bool,
         pub fail_link: bool,
         pub exists_on_add: Vec<String>,
@@ -734,6 +741,10 @@ pub mod fake {
                 return Err(io::Error::other(
                     "route: writing to routing socket: File exists",
                 ));
+            }
+            if let Some((_, message)) = inner.fail_add_with.iter().find(|(net, _)| *net == network)
+            {
+                return Err(io::Error::other(message.clone()));
             }
             if inner.fail_add.contains(&network) {
                 return Err(io::Error::other("add failed"));
@@ -963,6 +974,18 @@ mod tests {
         assert_eq!(
             parse_route_to(Platform::Linux, "1.2.3.4 dev -evil src 1.1.1.1\n"),
             None
+        );
+    }
+
+    #[test]
+    fn linux_route_lookup_skips_the_address_family_after_via() {
+        let out = "203.0.113.9 via inet6 fe80::1 dev eth0 src 192.168.1.50\n";
+        assert_eq!(
+            parse_route_to(Platform::Linux, out),
+            Some(Via::Gateway {
+                gateway: "fe80::1".parse().unwrap(),
+                dev: "eth0".into()
+            })
         );
     }
 

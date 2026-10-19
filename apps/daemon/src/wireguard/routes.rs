@@ -68,15 +68,15 @@ fn skip_reason(route: &Route) -> Option<SkipReason> {
     if route.net_gateway {
         return Some(SkipReason::NetGateway);
     }
-    let Cidr { addr, prefix } = route.network;
-    if addr.is_loopback() {
-        Some(SkipReason::Loopback)
-    } else if addr.is_multicast() {
-        Some(SkipReason::Multicast)
-    } else if addr.is_unspecified() && prefix != 0 {
-        Some(SkipReason::Unspecified)
-    } else {
-        None
+    let Cidr { addr, prefix } = masked(route.network);
+    match addr {
+        IpAddr::V4(ip) if ip.is_loopback() && prefix >= 8 => Some(SkipReason::Loopback),
+        IpAddr::V4(ip) if ip.is_multicast() && prefix >= 4 => Some(SkipReason::Multicast),
+        IpAddr::V4(ip) if ip.octets()[0] == 0 && prefix >= 8 => Some(SkipReason::Unspecified),
+        IpAddr::V6(ip) if ip.is_loopback() => Some(SkipReason::Loopback),
+        IpAddr::V6(ip) if ip.is_multicast() && prefix >= 8 => Some(SkipReason::Multicast),
+        IpAddr::V6(ip) if ip.is_unspecified() && prefix == 128 => Some(SkipReason::Unspecified),
+        _ => None,
     }
 }
 
@@ -96,6 +96,16 @@ pub fn allowed_ips(routes: &[Route], routes6: &[Route]) -> Allowed {
 }
 
 pub fn ensure_reachable(networks: &mut Vec<Cidr>, host: IpAddr) {
+    let prefix = if host.is_ipv4() { 32 } else { 128 };
+    let probe = Route {
+        network: Cidr { addr: host, prefix },
+        next_hop: None,
+        metric: None,
+        net_gateway: false,
+    };
+    if skip_reason(&probe).is_some() {
+        return;
+    }
     if !networks.iter().any(|network| contains(*network, host)) {
         let prefix = if host.is_ipv4() { 32 } else { 128 };
         networks.push(Cidr { addr: host, prefix });
@@ -137,6 +147,11 @@ pub fn needs_bypass(tunnel_networks: &[Cidr], endpoint: IpAddr) -> bool {
         .any(|network| contains(*network, endpoint))
 }
 
+pub fn without_host(networks: &mut Vec<Cidr>, host: IpAddr) {
+    let prefix = if host.is_ipv4() { 32 } else { 128 };
+    networks.retain(|network| !(network.prefix == prefix && network.addr == host));
+}
+
 pub fn is_critical(network: Cidr) -> bool {
     network.prefix <= 1
 }
@@ -163,7 +178,20 @@ pub fn tunnel_entries(networks: &[Cidr], dev: &str) -> Vec<RouteEntry> {
 }
 
 pub fn already_present(err: &std::io::Error) -> bool {
-    err.to_string().contains("File exists")
+    let text = err.to_string();
+    text.contains("File exists") || text.contains("already exists")
+}
+
+pub fn ipv6_unavailable(err: &std::io::Error) -> bool {
+    let text = err.to_string().to_ascii_lowercase();
+    [
+        "address family not supported",
+        "operation not supported",
+        "ipv6 is disabled",
+        "ipv6 is not",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
 }
 
 #[cfg(test)]
@@ -219,7 +247,7 @@ mod tests {
             route("0.0.0.0/8"),
             route("0.0.0.0/0"),
         ];
-        let routes6 = [route("::/0"), route("ff02::/16"), route("::/16")];
+        let routes6 = [route("::/0"), route("ff02::/16"), route("::/128")];
         let allowed = allowed_ips(&routes, &routes6);
         assert_eq!(
             allowed.networks,
@@ -233,7 +261,7 @@ mod tests {
                 (cidr("224.0.0.0/4"), SkipReason::Multicast),
                 (cidr("0.0.0.0/8"), SkipReason::Unspecified),
                 (cidr("ff02::/16"), SkipReason::Multicast),
-                (cidr("::/16"), SkipReason::Unspecified),
+                (cidr("::/128"), SkipReason::Unspecified),
             ]
         );
     }
@@ -250,6 +278,58 @@ mod tests {
         let mut empty = Vec::new();
         ensure_reachable(&mut empty, ip("fd00::1"));
         assert_eq!(empty, [cidr("fd00::1/128")]);
+    }
+
+    #[test]
+    fn halves_of_the_address_space_are_not_mistaken_for_unspecified() {
+        let allowed = allowed_ips(
+            &[route("0.0.0.0/1"), route("128.0.0.0/1")],
+            &[route("::/1"), route("8000::/1")],
+        );
+        assert!(allowed.skipped.is_empty());
+        assert_eq!(
+            allowed.networks,
+            [
+                cidr("0.0.0.0/1"),
+                cidr("128.0.0.0/1"),
+                cidr("::/1"),
+                cidr("8000::/1")
+            ]
+        );
+        let narrow = allowed_ips(
+            &[route("0.1.2.0/24"), route("0.0.0.0/7")],
+            &[route("::/64")],
+        );
+        assert_eq!(narrow.skipped.len(), 1);
+        assert_eq!(narrow.networks, [cidr("0.0.0.0/7"), cidr("::/64")]);
+    }
+
+    #[test]
+    fn unusable_gateways_are_not_routed() {
+        let mut networks = Vec::new();
+        ensure_reachable(&mut networks, ip("127.0.0.1"));
+        ensure_reachable(&mut networks, ip("224.0.0.1"));
+        assert!(networks.is_empty());
+    }
+
+    #[test]
+    fn the_endpoint_host_route_is_removed_from_the_tunnel_networks() {
+        let mut networks = vec![cidr("203.0.113.9/32"), cidr("10.0.0.0/8")];
+        without_host(&mut networks, ip("203.0.113.9"));
+        assert_eq!(networks, [cidr("10.0.0.0/8")]);
+    }
+
+    #[test]
+    fn classifies_errors() {
+        let exists = std::io::Error::other("The object already exists.");
+        assert!(already_present(&exists));
+        let no_v6 =
+            std::io::Error::other("RTNETLINK answers: Address family not supported by protocol");
+        assert!(ipv6_unavailable(&no_v6));
+        assert!(ipv6_unavailable(&std::io::Error::other(
+            "RTNETLINK answers: Operation not supported"
+        )));
+        assert!(!ipv6_unavailable(&std::io::Error::other("add failed")));
     }
 
     #[test]

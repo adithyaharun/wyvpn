@@ -159,10 +159,10 @@ pub fn locate_with(
     verify: &dyn Fn(&Path) -> Check,
     version_of: impl Fn(&Path) -> io::Result<String>,
 ) -> Result<OpenVpnBinary, BinaryError> {
-    if let Some(bundled) = bundled {
-        if let Some(binary) = inspect_bundled(bundled, stage_dir, verify, &version_of)? {
-            return Ok(binary);
-        }
+    if let Some(bundled) = bundled
+        && let Some(binary) = inspect_bundled(bundled, stage_dir, verify, &version_of)?
+    {
+        return Ok(binary);
     }
     locate_in(candidates, trust, version_of)
 }

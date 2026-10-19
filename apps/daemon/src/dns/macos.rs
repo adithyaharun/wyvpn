@@ -75,18 +75,17 @@ fn parse_dict(output: &str) -> Option<Vec<(String, Val)>> {
     for line in output.lines().map(str::trim) {
         if line.ends_with('{') {
             depth += 1;
-            if depth == 2 {
-                if let Some((key, rest)) = line.split_once(" : ") {
-                    if rest.starts_with("<array>") {
-                        array = Some((key.to_owned(), Vec::new()));
-                    }
-                }
+            if depth == 2
+                && let Some((key, rest)) = line.split_once(" : ")
+                && rest.starts_with("<array>")
+            {
+                array = Some((key.to_owned(), Vec::new()));
             }
         } else if line == "}" {
-            if depth == 2 {
-                if let Some((key, items)) = array.take() {
-                    entries.push((key, Val::Arr(items)));
-                }
+            if depth == 2
+                && let Some((key, items)) = array.take()
+            {
+                entries.push((key, Val::Arr(items)));
             }
             depth = depth.saturating_sub(1);
         } else if let Some((key, value)) = line.split_once(" : ") {

@@ -10,7 +10,7 @@ WyVPN is an alternative VPN connector: a client that talks to existing, unmodifi
 
 ## Layout
 
-Cargo workspace (edition 2024, MSRV 1.85) plus a Bun workspace for the desktop frontend.
+Cargo workspace (edition 2024, MSRV 1.95) plus a Bun workspace for the desktop frontend.
 
 | Path | Crate / package | Role |
 |---|---|---|

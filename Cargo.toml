@@ -7,7 +7,7 @@ default-members = ["apps/cli", "apps/daemon", "packages/*"]
 version = "0.1.2"
 edition = "2024"
 license = "MIT"
-rust-version = "1.85"
+rust-version = "1.95"
 repository = "https://github.com/adithyaharun/wyvpn"
 
 [workspace.dependencies]
@@ -15,6 +15,8 @@ wyvpn-core = { path = "packages/core" }
 wyvpn-ipc = { path = "packages/ipc" }
 
 anyhow = "1"
+gotatun = { version = "=0.10.1", default-features = false, features = ["ring", "device", "tun"] }
+ipnetwork = "0.21"
 nix = { version = "0.31", default-features = false, features = ["user", "fs", "hostname"] }
 rpassword = "7"
 rmcp = { version = "3.5", features = ["server", "macros", "transport-io"] }

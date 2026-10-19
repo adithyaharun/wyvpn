@@ -78,6 +78,11 @@ pub fn verify(path: &Path) -> Check {
     )
 }
 
+#[cfg(windows)]
+pub fn verify_wintun(path: &Path) -> Check {
+    windows::verify_with(path, windows::wintun_publisher_allowed)
+}
+
 #[cfg(not(any(target_os = "macos", windows)))]
 pub fn verify(_path: &Path) -> Check {
     Check::Skip("bundled binaries are not used on this platform".to_owned())
@@ -269,12 +274,21 @@ mod windows {
     use super::Check;
 
     const COMMUNITY_PUBLISHER: &str = "OpenVPN Inc.";
+    const WINTUN_PUBLISHER: &str = "WireGuard LLC";
 
     pub fn publisher_allowed(subject: &str, ours: Option<&str>) -> bool {
         subject == COMMUNITY_PUBLISHER || ours.is_some_and(|name| subject == name)
     }
 
+    pub fn wintun_publisher_allowed(subject: &str) -> bool {
+        subject == WINTUN_PUBLISHER
+    }
+
     pub fn verify(path: &Path, ours: Option<&str>) -> Check {
+        verify_with(path, |subject| publisher_allowed(subject, ours))
+    }
+
+    pub fn verify_with(path: &Path, allowed: impl Fn(&str) -> bool) -> Check {
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         let mut file = WINTRUST_FILE_INFO {
             cbStruct: size_of::<WINTRUST_FILE_INFO>() as u32,
@@ -307,7 +321,7 @@ mod windows {
         };
         let result = if status == 0 {
             match signer_name(data.hWVTStateData) {
-                Some(subject) if publisher_allowed(&subject, ours) => Check::Pass,
+                Some(subject) if allowed(&subject) => Check::Pass,
                 Some(subject) => Check::Fail(format!("untrusted publisher \"{subject}\"")),
                 None => Check::Fail("cannot read the signer certificate".to_owned()),
             }
@@ -374,6 +388,12 @@ mod windows {
             assert!(publisher_allowed("Example Ltd", Some("Example Ltd")));
             assert!(!publisher_allowed("Example Ltd", None));
             assert!(!publisher_allowed("Other", Some("Example Ltd")));
+        }
+
+        #[test]
+        fn wintun_publisher_allowlist() {
+            assert!(wintun_publisher_allowed("WireGuard LLC"));
+            assert!(!wintun_publisher_allowed("OpenVPN Inc."));
         }
     }
 }

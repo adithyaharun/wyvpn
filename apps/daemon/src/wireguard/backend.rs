@@ -1,6 +1,10 @@
+use std::io;
+use std::net::{SocketAddr, ToSocketAddrs};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use wyvpn_core::wireguard::{Cidr, Endpoint, PeerKey, WireGuardKeys};
+use anyhow::Context;
+use wyvpn_core::wireguard::{Cidr, Endpoint, Host, PeerKey, WireGuardKeys};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendConfig {
@@ -30,6 +34,42 @@ pub trait WgBackend: Send {
     fn down(&mut self) -> anyhow::Result<()>;
 }
 
+pub fn resolve_endpoint(endpoint: &Endpoint) -> io::Result<SocketAddr> {
+    match &endpoint.host {
+        Host::Ip(ip) => Ok(SocketAddr::new(ip.to_canonical(), endpoint.port)),
+        Host::Dns(name) => {
+            let mut addrs: Vec<SocketAddr> =
+                (name.as_str(), endpoint.port).to_socket_addrs()?.collect();
+            addrs.sort_by_key(SocketAddr::is_ipv6);
+            addrs
+                .into_iter()
+                .next()
+                .ok_or_else(|| io::Error::other("the endpoint host has no addresses"))
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct SharedBackend(Arc<Mutex<Box<dyn WgBackend>>>);
+
+impl SharedBackend {
+    pub fn new(backend: Box<dyn WgBackend>) -> Self {
+        Self(Arc::new(Mutex::new(backend)))
+    }
+
+    pub fn with<R>(&self, f: impl FnOnce(&mut dyn WgBackend) -> R) -> R {
+        let mut guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        f(guard.as_mut())
+    }
+
+    pub async fn stats(&self) -> anyhow::Result<PeerStats> {
+        let shared = self.clone();
+        tokio::task::spawn_blocking(move || shared.with(|backend| backend.stats()))
+            .await
+            .context("the stats task was interrupted")?
+    }
+}
+
 #[cfg(test)]
 pub mod fake {
     use std::sync::{Arc, Mutex, PoisonError};
@@ -48,6 +88,7 @@ pub mod fake {
         pub fail_up: Option<String>,
         pub stats: PeerStats,
         pub stats_fail: bool,
+        pub stats_calls: usize,
         pub fail_down: bool,
         pub is_up: bool,
     }
@@ -96,6 +137,7 @@ pub mod fake {
 
         fn stats(&self) -> anyhow::Result<PeerStats> {
             self.handle.with(|record| {
+                record.stats_calls += 1;
                 if !record.is_up {
                     anyhow::bail!("interface is down");
                 }
@@ -172,5 +214,35 @@ pub mod fake {
             .unwrap_err();
         assert_eq!(err.to_string(), "no tun device");
         handle.with(|record| assert!(!record.is_up && record.configs.is_empty()));
+    }
+
+    #[test]
+    fn endpoint_resolution_prefers_ipv4_and_canonical_addresses() {
+        let ip = Endpoint {
+            host: Host::Ip("::ffff:203.0.113.9".parse().unwrap()),
+            port: 51820,
+        };
+        assert_eq!(
+            resolve_endpoint(&ip).unwrap(),
+            "203.0.113.9:51820".parse::<SocketAddr>().unwrap()
+        );
+        let name = Endpoint {
+            host: Host::Dns("localhost".into()),
+            port: 7,
+        };
+        let resolved = resolve_endpoint(&name).unwrap();
+        assert!(resolved.ip().is_loopback());
+        assert_eq!(resolved.port(), 7);
+    }
+
+    #[tokio::test]
+    async fn shared_backend_serves_stats_off_the_runtime_threads() {
+        let (mut backend, handle) = pair();
+        backend.up(&config(), &WireGuardKeys::generate()).unwrap();
+        handle.with(|record| record.stats.rx_bytes = 42);
+        let shared = SharedBackend::new(Box::new(backend));
+        assert_eq!(shared.stats().await.unwrap().rx_bytes, 42);
+        shared.with(|backend| backend.down()).unwrap();
+        assert!(shared.stats().await.is_err());
     }
 }

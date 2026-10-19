@@ -84,6 +84,18 @@ pub fn pin_key(host: &str, port: u16) -> String {
     format!("{host}:{port}")
 }
 
+fn normalize_pins(pins: &Pins) -> Pins {
+    pins.iter()
+        .map(|(key, fingerprint)| {
+            let normalized = key
+                .rsplit_once(':')
+                .and_then(|(host, port)| Some(pin_key(host, port.parse().ok()?)))
+                .unwrap_or_else(|| key.clone());
+            (normalized, *fingerprint)
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TlsPolicy {
     Verify,
@@ -255,6 +267,15 @@ pub(crate) fn client_config(
     port: u16,
     inner: RootVerifier,
 ) -> Result<ClientConfig> {
+    let policy = match policy {
+        TlsPolicy::Verify => TlsPolicy::Verify,
+        TlsPolicy::TrustOnFirstUse { pins } => TlsPolicy::TrustOnFirstUse {
+            pins: normalize_pins(&pins),
+        },
+        TlsPolicy::Strict { pins } => TlsPolicy::Strict {
+            pins: normalize_pins(&pins),
+        },
+    };
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut config = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -570,5 +591,30 @@ mod tests {
         assert_eq!(pin_key("::ffff:127.0.0.1", 443), canonical);
         assert_eq!(pin_key("[2001:db8::1]", 9443), "[2001:db8::1]:9443");
         assert_eq!(pin_key("Example.com", 443), "Example.com:443");
+    }
+
+    #[tokio::test]
+    async fn pins_saved_under_the_mapped_ipv6_key_still_apply() {
+        let server = self_signed_server().await;
+        let old_key = format!("[::ffff:7f00:1]:{}", server.port);
+        let matching = Pins::from([(old_key.clone(), server.fingerprint)]);
+        let client = ApiClient::new(TlsPolicy::pinned(matching)).unwrap();
+        assert_eq!(client.execute(get(server.port)).await.unwrap().status, 200);
+
+        let stale = Fingerprint::of_certificate(b"previous certificate");
+        let client = ApiClient::new(TlsPolicy::pinned(Pins::from([(old_key, stale)]))).unwrap();
+        assert!(matches!(
+            client.execute(get(server.port)).await.unwrap_err(),
+            Error::CertificateChanged { .. }
+        ));
+    }
+
+    #[test]
+    fn url_and_verifier_pin_keys_agree() {
+        let url = Url::parse("https://[::ffff:127.0.0.1]:8443/").unwrap();
+        assert_eq!(
+            crate::http::url_pin_key(&url).unwrap(),
+            pin_key("::ffff:127.0.0.1", 8443)
+        );
     }
 }

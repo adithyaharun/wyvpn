@@ -376,9 +376,15 @@ impl WireGuardConfig {
             .hostname6
             .filter(|h| !h.is_empty())
             .map(|h| {
-                h.trim_matches(['[', ']'])
-                    .parse::<Ipv6Addr>()
-                    .map_err(|_| Error::InvalidResponse("hostname6 is not an IPv6 address".into()))
+                let bad = || Error::InvalidResponse("hostname6 is not an IPv6 address".into());
+                let inner = match h.strip_prefix('[') {
+                    Some(rest) => rest.strip_suffix(']').ok_or_else(bad)?,
+                    None => h.as_str(),
+                };
+                match inner.parse::<Ipv6Addr>() {
+                    Ok(ip) if !endpoint_ip_refused(IpAddr::V6(ip)) => Ok(ip),
+                    _ => Err(bad()),
+                }
             })
             .transpose()?;
         let port = required(raw.port, "port")?;
@@ -844,7 +850,7 @@ fn trim_trailing_dot(url: &mut Url) -> bool {
     match name.strip_suffix('.') {
         Some(trimmed) => {
             let trimmed = trimmed.to_owned();
-            !trimmed.is_empty() && url.set_host(Some(&trimmed)).is_ok()
+            !trimmed.is_empty() && !trimmed.ends_with('.') && url.set_host(Some(&trimmed)).is_ok()
         }
         None => true,
     }

@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -30,12 +31,15 @@ impl Parts {
     pub fn system(runtime: tokio::runtime::Handle, data_dir: &Path) -> anyhow::Result<Self> {
         let platform = Platform::current();
         let programs = Programs::locate(platform)?;
-        let net = |programs: &Programs| SystemNet::new(SystemExec, platform, programs.clone());
+        let net =
+            |programs: &Programs| SystemNet::new(SystemExec::default(), platform, programs.clone());
         #[cfg(unix)]
         let dns: Box<dyn DnsControl> = Box::new(super::dnsctl::NativeDns::new(data_dir));
         #[cfg(windows)]
-        let dns: Box<dyn DnsControl> =
-            Box::new(super::dnsctl::AdapterDns::new(SystemExec, programs.clone()));
+        let dns: Box<dyn DnsControl> = Box::new(super::dnsctl::AdapterDns::new(
+            SystemExec::default(),
+            programs.clone(),
+        ));
         Ok(Self {
             backend: Box::new(UserspaceBackend::new(runtime, Box::new(net(&programs)))),
             routes: Box::new(net(&programs)),
@@ -48,14 +52,20 @@ impl Parts {
 
 pub struct Tunnel {
     backend: SharedBackend,
+    interface: String,
+    endpoint: SocketAddr,
+    live: Option<Live>,
+}
+
+struct Live {
+    backend: SharedBackend,
     routes: Box<dyn RouteOps>,
     dns: Box<dyn DnsControl>,
     store: StateStore,
     interface: String,
-    endpoint: SocketAddr,
     installed: Vec<RouteEntry>,
     dns_applied: bool,
-    finished: bool,
+    held: Vec<Box<dyn Any + Send>>,
 }
 
 impl Tunnel {
@@ -108,34 +118,71 @@ impl Tunnel {
             .name;
 
         let mut tunnel = Self {
-            backend,
-            routes,
-            dns,
-            store,
-            interface,
+            backend: backend.clone(),
+            interface: interface.clone(),
             endpoint,
-            installed: Vec::new(),
-            dns_applied: false,
-            finished: false,
+            live: Some(Live {
+                backend,
+                routes,
+                dns,
+                store,
+                interface,
+                installed: Vec::new(),
+                dns_applied: false,
+                held: Vec::new(),
+            }),
         };
-
+        let live = tunnel.live_mut();
         if let Some(entry) = bypass {
-            tunnel.install(entry, true)?;
+            live.install(entry, true)?;
         }
-        for entry in tunnel_entries(&tunnel_networks, &tunnel.interface) {
-            tunnel.install(entry, false)?;
+        for entry in tunnel_entries(&tunnel_networks, &live.interface.clone()) {
+            live.install(entry, false)?;
         }
 
         let dns_config = tunnel_dns(config);
         if !dns_config.is_empty() {
-            tunnel.dns_applied = true;
-            if let Err(err) = tunnel.dns.apply(&tunnel.interface, &dns_config) {
+            live.dns_applied = true;
+            if let Err(err) = live.dns.apply(&live.interface, &dns_config) {
                 tracing::warn!(%err, "cannot apply dns");
             }
         }
         Ok(tunnel)
     }
 
+    fn live_mut(&mut self) -> &mut Live {
+        self.live
+            .as_mut()
+            .expect("the tunnel is live until torn down")
+    }
+
+    pub fn keep(&mut self, token: impl Send + 'static) {
+        if let Some(live) = self.live.as_mut() {
+            live.held.push(Box::new(token));
+        }
+    }
+
+    pub fn backend(&self) -> SharedBackend {
+        self.backend.clone()
+    }
+
+    pub fn endpoint(&self) -> SocketAddr {
+        self.endpoint
+    }
+
+    pub fn interface(&self) -> &str {
+        &self.interface
+    }
+
+    pub fn tear_down(&mut self) -> anyhow::Result<()> {
+        match self.live.take() {
+            Some(live) => live.teardown(),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Live {
     fn persist(&self, pending: Option<&RouteEntry>) -> anyhow::Result<()> {
         let mut entries = self.installed.clone();
         entries.extend(pending.cloned());
@@ -169,23 +216,7 @@ impl Tunnel {
         Ok(())
     }
 
-    pub fn backend(&self) -> SharedBackend {
-        self.backend.clone()
-    }
-
-    pub fn endpoint(&self) -> SocketAddr {
-        self.endpoint
-    }
-
-    pub fn interface(&self) -> &str {
-        &self.interface
-    }
-
-    pub fn tear_down(&mut self) -> anyhow::Result<()> {
-        if self.finished {
-            return Ok(());
-        }
-        self.finished = true;
+    fn teardown(mut self) -> anyhow::Result<()> {
         let mut failures = Vec::new();
         let mut keep_record = false;
         if self.dns_applied
@@ -219,8 +250,18 @@ impl Tunnel {
 
 impl Drop for Tunnel {
     fn drop(&mut self) {
-        if let Err(err) = self.tear_down() {
-            tracing::warn!(%err, "tunnel cleanup failed");
+        let Some(live) = self.live.take() else {
+            return;
+        };
+        let run = move || {
+            if let Err(err) = live.teardown() {
+                tracing::warn!(%err, "tunnel cleanup failed");
+            }
+        };
+        if tokio::runtime::Handle::try_current().is_ok() {
+            std::thread::spawn(run);
+        } else {
+            run();
         }
     }
 }

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
-use tokio::time::{Instant, sleep};
+use tokio::sync::{mpsc, watch};
+use tokio::time::{Instant, sleep, timeout};
 use wyvpn_core::Error as CoreError;
 use wyvpn_core::wireguard::Keepalive;
 
@@ -47,15 +47,17 @@ pub async fn round(pinger: &dyn Pinger, timing: &Timing) -> Result<(), String> {
     let started = Instant::now();
     let mut last = String::new();
     for attempt in 1..=timing.attempts {
-        match pinger.ping().await {
-            Ok(reply) if reply.status => return Ok(()),
-            Ok(_) => return Err("the server no longer has this client".to_owned()),
-            Err(err) => {
+        let remaining = timing.round_cap.saturating_sub(started.elapsed());
+        match timeout(remaining, pinger.ping()).await {
+            Ok(Ok(reply)) if reply.status => return Ok(()),
+            Ok(Ok(_)) => return Err("the server no longer has this client".to_owned()),
+            Ok(Err(err)) => {
                 last = core_error(&err).message;
                 if is_final(&err) {
                     return Err(last);
                 }
             }
+            Err(_) => last = "the request timed out".to_owned(),
         }
         if attempt == timing.attempts || started.elapsed() >= timing.round_cap {
             break;
@@ -71,9 +73,17 @@ pub async fn run(
     timing: Timing,
     jitter: fn(u32) -> u32,
     events: mpsc::Sender<TunnelEvent>,
+    mut handshake: watch::Receiver<bool>,
 ) {
     loop {
         if let Err(reason) = round(pinger.as_ref(), &timing).await {
+            if !*handshake.borrow() {
+                // a failing round before the handshake is the handshake wait's to report
+                if handshake.wait_for(|up| *up).await.is_err() {
+                    return;
+                }
+                continue;
+            }
             let _ = events
                 .send(TunnelEvent::Fatal(format!("keepalive failed: {reason}")))
                 .await;
@@ -128,6 +138,10 @@ mod tests {
 
     fn no_jitter(_max: u32) -> u32 {
         0
+    }
+
+    fn up() -> watch::Receiver<bool> {
+        watch::channel(true).1
     }
 
     #[tokio::test(start_paused = true)]
@@ -216,6 +230,7 @@ mod tests {
             Timing::default(),
             |max| max.min(1500),
             events,
+            up(),
         ));
         let event = receiver.recv().await.unwrap();
         let calls = pinger.calls.lock().unwrap().clone();
@@ -247,10 +262,68 @@ mod tests {
             Timing::default(),
             no_jitter,
             events,
+            up(),
         ));
         assert!(matches!(receiver.recv().await, Some(TunnelEvent::Fatal(_))));
         task.await.unwrap();
         assert!(receiver.recv().await.is_none());
         assert_eq!(pinger.count(), 9);
+    }
+
+    struct Hangs;
+
+    impl Pinger for Hangs {
+        fn ping(&self) -> BoxFuture<'_, Result<Keepalive, CoreError>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_request_cannot_outlive_the_round_cap() {
+        let start = Instant::now();
+        let err = round(&Hangs, &Timing::default()).await.unwrap_err();
+        assert_eq!(start.elapsed(), Duration::from_secs(15));
+        assert!(err.contains("timed out"), "{err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failures_before_the_handshake_are_not_reported_as_lost() {
+        let pinger = Script::new(&[]);
+        let (events, mut receiver) = mpsc::channel(4);
+        let (up, handshake) = watch::channel(false);
+        tokio::spawn(run(
+            pinger.clone(),
+            Duration::from_secs(30),
+            Timing::default(),
+            no_jitter,
+            events,
+            handshake,
+        ));
+        sleep(Duration::from_secs(40)).await;
+        assert!(receiver.try_recv().is_err());
+        up.send(true).unwrap();
+        let TunnelEvent::Fatal(reason) = receiver.recv().await.unwrap() else {
+            panic!("expected a lost event once the handshake is up");
+        };
+        assert!(reason.starts_with("keepalive failed"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_loop_ends_quietly_when_the_handshake_never_comes() {
+        let pinger = Script::new(&[]);
+        let (events, mut receiver) = mpsc::channel(4);
+        let (up, handshake) = watch::channel(false);
+        let task = tokio::spawn(run(
+            pinger,
+            Duration::from_secs(30),
+            Timing::default(),
+            no_jitter,
+            events,
+            handshake,
+        ));
+        sleep(Duration::from_secs(20)).await;
+        drop(up);
+        task.await.unwrap();
+        assert!(receiver.recv().await.is_none());
     }
 }

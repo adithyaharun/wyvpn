@@ -171,7 +171,7 @@ pub fn recover(data_dir: &Path) {
     let platform = Platform::current();
     match Programs::locate(platform) {
         Ok(programs) => {
-            let mut net = SystemNet::new(SystemExec, platform, programs);
+            let mut net = SystemNet::new(SystemExec::default(), platform, programs);
             recover_with(&store, &mut net, platform);
         }
         Err(err) => tracing::warn!(%err, "cannot clean up wireguard routes left by a previous run"),

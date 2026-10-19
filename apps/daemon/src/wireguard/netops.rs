@@ -124,9 +124,24 @@ fn locate_tool(tool: &'static str, candidates: &[&str]) -> Result<String, ToolEr
     })
 }
 
+#[cfg(windows)]
+fn system_directory() -> Option<String> {
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buffer = [0u16; 260];
+    // SAFETY: the buffer length passed matches the buffer
+    let written = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+    (written > 0 && written < buffer.len()).then(|| String::from_utf16_lossy(&buffer[..written]))
+}
+
+#[cfg(not(windows))]
+fn system_directory() -> Option<String> {
+    None
+}
+
 fn netsh_path() -> String {
-    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
-    format!(r"{root}\System32\netsh.exe")
+    let dir = system_directory().unwrap_or_else(|| r"C:\Windows\System32".to_owned());
+    format!(r"{dir}\netsh.exe")
 }
 
 impl Programs {

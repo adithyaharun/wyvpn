@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
 use wyvpn_core::http::ApiClient;
@@ -55,6 +56,23 @@ pub struct WireGuardLauncher {
     parts: PartsFactory,
     timing: Timing,
     stats_interval: Duration,
+    bring_up_gate: Arc<Mutex<()>>,
+}
+
+struct CancelOnDrop(Option<Arc<AtomicBool>>);
+
+impl CancelOnDrop {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(flag) = self.0.take() {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
 }
 
 impl WireGuardLauncher {
@@ -65,6 +83,7 @@ impl WireGuardLauncher {
             parts: Arc::new(move || Parts::system(tokio::runtime::Handle::current(), &data_dir)),
             timing: Timing::default(),
             stats_interval: STATS_INTERVAL,
+            bring_up_gate: Arc::default(),
         }
     }
 
@@ -81,17 +100,29 @@ impl WireGuardLauncher {
             .await
             .context("the availability check was interrupted")??;
 
-        let registered = self.server.register(&request).await?;
+        let registered =
+            tokio::time::timeout(register::TOTAL_DEADLINE, self.server.register(&request))
+                .await
+                .map_err(|_| RegisterError::Timeout)??;
         drop(request);
         let Registered { session, pinger } = registered;
 
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut cancel_on_drop = CancelOnDrop(Some(Arc::clone(&cancelled)));
+        let gate = Arc::clone(&self.bring_up_gate).lock_owned().await;
         let parts = (self.parts)()?;
         let for_bring_up = Arc::clone(&session);
         let tunnel = tokio::task::spawn_blocking(move || {
-            Tunnel::bring_up(parts, &for_bring_up.config, &for_bring_up.keys)
+            if cancelled.load(Ordering::SeqCst) {
+                bail!("the connection was cancelled");
+            }
+            let mut tunnel = Tunnel::bring_up(parts, &for_bring_up.config, &for_bring_up.keys)?;
+            tunnel.keep(gate);
+            Ok(tunnel)
         })
         .await
         .context("tunnel bring-up was interrupted")??;
+        cancel_on_drop.disarm();
 
         let (events, receiver) = mpsc::channel(EVENT_BUFFER);
         let _ = events
@@ -107,11 +138,13 @@ impl WireGuardLauncher {
         let keepalive_interval = session.config.keepalive_interval();
         drop(session);
 
+        let (handshake_up, handshake) = watch::channel(false);
         let monitor = tokio::spawn(monitor(
             tunnel.backend(),
             events.clone(),
             link,
             self.stats_interval,
+            handshake_up,
         ));
         let keepalive = tokio::spawn(keepalive::run(
             pinger,
@@ -119,6 +152,7 @@ impl WireGuardLauncher {
             self.timing,
             wyvpn_core::rng::below,
             events,
+            handshake,
         ));
         Ok(Launched {
             running: Box::new(Active {
@@ -157,6 +191,7 @@ async fn monitor(
     events: mpsc::Sender<TunnelEvent>,
     link: Link,
     tick: Duration,
+    handshake_up: watch::Sender<bool>,
 ) {
     let first = match wait_for_handshake(&backend).await {
         Ok(stats) => stats,
@@ -165,6 +200,7 @@ async fn monitor(
             return;
         }
     };
+    let _ = handshake_up.send(true);
     let mut last_handshake = None;
     let mut report = |stats: super::backend::PeerStats| {
         let at = stats
@@ -441,6 +477,9 @@ pub mod testing {
         pub pinger: Arc<ScriptedPinger>,
         pub deny: Arc<AtomicBool>,
         pub unavailable: Arc<AtomicBool>,
+        pub fail_up: Arc<Mutex<Option<String>>>,
+        pub register_delay: Arc<Mutex<Duration>>,
+        pub block_up: Arc<Mutex<Option<BlockUp>>>,
         pub config: WireGuardConfig,
         data: Arc<tempfile::TempDir>,
     }
@@ -450,7 +489,38 @@ pub mod testing {
         sessions: Arc<Mutex<Vec<Weak<WireGuardSession>>>>,
         pinger: Arc<ScriptedPinger>,
         deny: Arc<AtomicBool>,
+        delay: Arc<Mutex<Duration>>,
         config: WireGuardConfig,
+    }
+
+    pub struct BlockUp {
+        pub entered: std::sync::mpsc::Sender<()>,
+        pub release: std::sync::mpsc::Receiver<()>,
+    }
+
+    struct BlockingBackend {
+        inner: fake::FakeBackend,
+        block: BlockUp,
+    }
+
+    impl super::super::backend::WgBackend for BlockingBackend {
+        fn up(
+            &mut self,
+            config: &super::super::backend::BackendConfig,
+            keys: &WireGuardKeys,
+        ) -> anyhow::Result<super::super::backend::Interface> {
+            let _ = self.block.entered.send(());
+            let _ = self.block.release.recv();
+            self.inner.up(config, keys)
+        }
+
+        fn stats(&self) -> anyhow::Result<super::super::backend::PeerStats> {
+            self.inner.stats()
+        }
+
+        fn down(&mut self) -> anyhow::Result<()> {
+            self.inner.down()
+        }
     }
 
     impl Server for FakeServer {
@@ -460,6 +530,10 @@ pub mod testing {
         ) -> BoxFuture<'a, Result<Registered, RegisterError>> {
             Box::pin(async move {
                 self.registrations.fetch_add(1, Ordering::SeqCst);
+                let delay = *self.delay.lock().unwrap_or_else(PoisonError::into_inner);
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
                 if self.deny.load(Ordering::SeqCst) {
                     return Err(RegisterError::Denied {
                         reason: Some("no access".into()),
@@ -496,6 +570,9 @@ pub mod testing {
                 pinger: Arc::default(),
                 deny: Arc::default(),
                 unavailable: Arc::default(),
+                fail_up: Arc::default(),
+                register_delay: Arc::default(),
+                block_up: Arc::default(),
                 config,
                 data: Arc::new(tempfile::tempdir().unwrap()),
             }
@@ -539,6 +616,8 @@ pub mod testing {
             let net = self.net.clone();
             let dns = self.dns.clone();
             let data = Arc::clone(&self.data);
+            let fail_up = Arc::clone(&self.fail_up);
+            let block_up = Arc::clone(&self.block_up);
             WireGuardLauncher {
                 preflight: Arc::new(move || {
                     if unavailable.load(Ordering::SeqCst) {
@@ -552,16 +631,34 @@ pub mod testing {
                     sessions: Arc::clone(&self.sessions),
                     pinger: Arc::clone(&self.pinger),
                     deny: Arc::clone(&self.deny),
+                    delay: Arc::clone(&self.register_delay),
                     config: self.config.clone(),
                 }),
                 parts: Arc::new(move || {
                     let (backend, handle) = fake::pair();
+                    handle.with(|record| {
+                        record.fail_up = fail_up
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .clone();
+                    });
                     backends
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .push(handle);
+                    let blocked = block_up
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take();
+                    let backend: Box<dyn super::super::backend::WgBackend> = match blocked {
+                        Some(block) => Box::new(BlockingBackend {
+                            inner: backend,
+                            block,
+                        }),
+                        None => Box::new(backend),
+                    };
                     Ok(Parts {
-                        backend: Box::new(backend),
+                        backend,
                         routes: Box::new(net.clone()),
                         dns: Box::new(dns.clone()),
                         store: StateStore::new(data.path()),
@@ -570,6 +667,7 @@ pub mod testing {
                 }),
                 timing: Timing::default(),
                 stats_interval: STATS_INTERVAL,
+                bring_up_gate: Arc::default(),
             }
         }
     }
@@ -753,29 +851,24 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn bring_up_failure_leaves_nothing_behind() {
         let fakes = Fakes::new();
-        let mut launcher = fakes.launcher();
-        let backends = Arc::clone(&fakes.backends);
-        launcher.parts = Arc::new(move || {
-            let (backend, handle) = crate::wireguard::backend::fake::pair();
-            handle.with(|record| record.fail_up = Some("no tun device".into()));
-            backends.lock().unwrap().push(handle);
-            Ok(Parts {
-                backend: Box::new(backend),
-                routes: Box::new(fakes_net()),
-                dns: Box::new(crate::wireguard::dnsctl::fake::FakeDns::default()),
-                store: crate::wireguard::state::StateStore::new(std::path::Path::new(
-                    "/nonexistent",
-                )),
-                resolve: Box::new(crate::wireguard::backend::resolve_endpoint),
-            })
-        });
-        let err = launcher.launch_request(request()).await.err().unwrap();
+        *fakes.fail_up.lock().unwrap() = Some("no tun device".into());
+        let err = fakes
+            .launcher()
+            .launch_request(request())
+            .await
+            .err()
+            .unwrap();
         assert!(format!("{err:#}").contains("no tun device"));
+        assert!(fakes.net.log().is_empty());
+        assert!(fakes.dns.log().is_empty());
+        fakes.backend(0).with(|record| {
+            assert!(record.configs.is_empty());
+            assert!(!record.is_up);
+        });
+        assert!(!fakes.state_record().exists());
         assert_eq!(fakes.live_sessions(), 0);
-    }
-
-    fn fakes_net() -> crate::wireguard::netops::fake::FakeNet {
-        crate::wireguard::netops::fake::FakeNet::default()
+        *fakes.fail_up.lock().unwrap() = None;
+        assert!(fakes.launcher().launch_request(request()).await.is_ok());
     }
 
     #[tokio::test(start_paused = true)]
@@ -817,6 +910,149 @@ mod tests {
         assert_eq!(fakes.pinger.pings(), 1);
         drop(events);
         running.stop().await;
+    }
+
+    async fn settle_until(mut done: impl FnMut() -> bool) {
+        for _ in 0..2000 {
+            if done() {
+                return;
+            }
+            tokio::task::yield_now().await;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the condition never became true");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn keepalive_failures_before_the_handshake_do_not_hide_the_timeout() {
+        let fakes = Fakes::new();
+        for _ in 0..64 {
+            fakes.pinger.push(Err(503));
+        }
+        let Launched {
+            running,
+            mut events,
+        } = fakes.launcher().launch_request(request()).await.unwrap();
+        let TunnelEvent::Fatal(reason) = next_non_log(&mut events).await else {
+            panic!("expected a failure");
+        };
+        assert!(reason.contains("handshake timeout"), "{reason}");
+        running.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_late_handshake_survives_an_early_failed_keepalive_round() {
+        let fakes = Fakes::new();
+        for _ in 0..8 {
+            fakes.pinger.push(Err(503));
+        }
+        let Launched {
+            running,
+            mut events,
+        } = fakes.launcher().launch_request(request()).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        fakes.handshake(0, 1, 1);
+        loop {
+            match next(&mut events).await {
+                TunnelEvent::Connected { .. } => break,
+                TunnelEvent::Fatal(reason) => panic!("unexpected failure: {reason}"),
+                _ => {}
+            }
+        }
+        running.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_registration_is_cut_off_with_its_own_error() {
+        let fakes = Fakes::new();
+        *fakes.register_delay.lock().unwrap() = Duration::from_secs(3600);
+        let started = tokio::time::Instant::now();
+        let err = fakes
+            .launcher()
+            .launch_request(request())
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(
+            err.downcast_ref::<RegisterError>(),
+            Some(RegisterError::Timeout)
+        ));
+        assert_eq!(started.elapsed(), register::TOTAL_DEADLINE);
+        assert_eq!(fakes.backend_count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopping_during_registration_never_brings_the_tunnel_up() {
+        let fakes = Fakes::new();
+        *fakes.register_delay.lock().unwrap() = Duration::from_secs(10);
+        let launcher = Arc::new(fakes.launcher());
+        let pending = tokio::spawn({
+            let launcher = Arc::clone(&launcher);
+            async move { launcher.launch_request(request()).await.map(drop) }
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        pending.abort();
+        let _ = pending.await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        assert_eq!(fakes.backend_count(), 0);
+        assert!(fakes.net.log().is_empty());
+        *fakes.register_delay.lock().unwrap() = Duration::ZERO;
+        let Launched { running, .. } = launcher.launch_request(request()).await.unwrap();
+        running.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_abandoned_bring_up_is_torn_down_before_the_next_one_starts() {
+        let fakes = Fakes::new();
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (release_tx, release) = std::sync::mpsc::channel();
+        *fakes.block_up.lock().unwrap() = Some(testing::BlockUp {
+            entered: entered_tx,
+            release,
+        });
+        let launcher = Arc::new(fakes.launcher());
+        let first = tokio::spawn({
+            let launcher = Arc::clone(&launcher);
+            async move { launcher.launch_request(request()).await.map(drop) }
+        });
+        settle_until(|| entered.try_recv().is_ok()).await;
+        first.abort();
+        let _ = first.await;
+
+        let second = tokio::spawn({
+            let launcher = Arc::clone(&launcher);
+            async move { launcher.launch_request(request()).await }
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(fakes.backend_count(), 1);
+        release_tx.send(()).unwrap();
+        let Launched { running, .. } = second.await.unwrap().unwrap();
+        fakes.backend(0).with(|record| assert_eq!(record.downs, 1));
+        assert_eq!(fakes.backend_count(), 2);
+        assert!(fakes.state_record().exists());
+        running.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_a_running_tunnel_still_cleans_up() {
+        let fakes = Fakes::new();
+        let Launched {
+            running,
+            mut events,
+        } = fakes.launcher().launch_request(request()).await.unwrap();
+        fakes.handshake(0, 1, 1);
+        while !matches!(next(&mut events).await, TunnelEvent::Connected { .. }) {}
+        drop(running);
+        settle_until(|| fakes.backend(0).with(|record| record.downs) == 1).await;
+        settle_until(|| !fakes.state_record().exists()).await;
+        assert!(
+            fakes
+                .net
+                .log()
+                .contains(&"del 10.0.0.0/8 dev fake0".to_owned())
+        );
+        assert_eq!(fakes.dns.log().last().unwrap(), "restore");
+        settle_until(|| fakes.live_sessions() == 0).await;
     }
 
     #[test]

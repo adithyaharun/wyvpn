@@ -1,12 +1,49 @@
-use std::io;
+use std::io::{self, Read};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub trait Exec: Send + Sync {
     fn run(&self, program: &str, args: &[&str]) -> io::Result<String>;
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SystemExec;
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Copy)]
+pub struct SystemExec {
+    timeout: Duration,
+}
+
+impl SystemExec {
+    #[cfg(test)]
+    pub const fn with_timeout(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+}
+
+impl Default for SystemExec {
+    fn default() -> Self {
+        Self {
+            timeout: COMMAND_TIMEOUT,
+        }
+    }
+}
+
+fn drain(pipe: Option<impl Read + Send + 'static>) -> Option<thread::JoinHandle<Vec<u8>>> {
+    pipe.map(|mut pipe| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    })
+}
+
+fn collected(handle: Option<thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default()
+}
 
 impl Exec for SystemExec {
     fn run(&self, program: &str, args: &[&str]) -> io::Result<String> {
@@ -21,21 +58,64 @@ impl Exec for SystemExec {
         if let Some(root) = std::env::var_os("SystemRoot") {
             command.env("SystemRoot", root);
         }
-        let output = command.output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut child = command.spawn()?;
+        let stdout = drain(child.stdout.take());
+        let stderr = drain(child.stderr.take());
+        let deadline = Instant::now() + self.timeout;
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "{program} did not finish within {} s",
+                        self.timeout.as_secs()
+                    ),
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        let stdout = String::from_utf8_lossy(&collected(stdout)).into_owned();
+        if !status.success() {
+            let stderr = String::from_utf8_lossy(&collected(stderr)).into_owned();
             let detail = [stderr.trim(), stdout.trim()]
                 .into_iter()
                 .find(|text| !text.is_empty())
                 .and_then(|text| text.lines().next())
                 .unwrap_or_default();
             return Err(io::Error::other(format!(
-                "{program} exited with {}: {detail}",
-                output.status
+                "{program} exited with {status}: {detail}"
             )));
         }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(stdout)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod system_tests {
+    use super::*;
+
+    #[test]
+    fn a_hung_child_is_killed_at_the_timeout() {
+        let exec = SystemExec::with_timeout(Duration::from_millis(200));
+        let started = Instant::now();
+        let err = exec.run("/bin/sleep", &["30"]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn output_and_failures_are_reported() {
+        let exec = SystemExec::default();
+        assert_eq!(exec.run("/bin/echo", &["hello"]).unwrap().trim(), "hello");
+        let err = exec
+            .run("/bin/ls", &["/nonexistent-wyvpn-path"])
+            .unwrap_err();
+        assert!(err.to_string().contains("exited with"), "{err}");
     }
 }
 

@@ -17,7 +17,7 @@ use crate::control::core_error;
 const STATUS_KEY_REUSED: u16 = 413;
 const STATUS_SERVER_OFFLINE: u16 = 429;
 const MAX_TEXT_CHARS: usize = 256;
-const TOTAL_DEADLINE: Duration = Duration::from_secs(50);
+pub const TOTAL_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Error)]
 pub enum RegisterError {

@@ -1,9 +1,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use anyhow::{Context, bail, ensure};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
+use anyhow::{Context, bail};
 use gotatun::device::{self, DefaultDeviceTransports, Device, DeviceTransports, Peer};
 use gotatun::tun::tun_async_device::TunDevice;
 use gotatun::tun::{IpRecv, IpSend};
@@ -13,7 +11,7 @@ use gotatun::x25519::{PublicKey, StaticSecret};
 use ipnetwork::IpNetwork;
 use tokio::runtime::Handle;
 use wyvpn_core::wireguard::{Cidr, WireGuardKeys};
-use zeroize::Zeroizing;
+use zeroize::Zeroize;
 
 use super::backend::{BackendConfig, Interface, PeerStats, WgBackend, resolve_endpoint};
 use super::netops::{LinkConfig, LinkOps};
@@ -75,16 +73,12 @@ fn linux_tun_name() -> String {
     )
 }
 
-pub fn private_key(keys: &WireGuardKeys) -> anyhow::Result<StaticSecret> {
-    let encoded = keys.private_key_base64();
-    let mut buffer = Zeroizing::new([0u8; 48]);
-    let written = STANDARD
-        .decode_slice(encoded.as_bytes(), &mut buffer[..])
-        .context("the private key is not valid base64")?;
-    ensure!(written == 32, "the private key is not 32 bytes");
-    let mut key = Zeroizing::new([0u8; 32]);
-    key.copy_from_slice(&buffer[..32]);
-    Ok(StaticSecret::from(*key))
+pub fn private_key(keys: &WireGuardKeys) -> StaticSecret {
+    let mut bytes = *keys.private_bytes();
+    let secret = StaticSecret::from(bytes);
+    bytes.zeroize();
+    std::hint::black_box(&mut bytes);
+    secret
 }
 
 fn to_network(cidr: Cidr) -> anyhow::Result<IpNetwork> {
@@ -145,7 +139,7 @@ impl WgBackend for UserspaceBackend {
         let _enter = self.runtime.enter();
         let endpoint =
             resolve_endpoint(&config.endpoint).context("cannot resolve the server address")?;
-        let secret = private_key(keys)?;
+        let secret = private_key(keys);
         let peer = build_peer(config, endpoint)?;
         let public_key = peer.public_key;
 
@@ -192,7 +186,16 @@ impl WgBackend for UserspaceBackend {
 
 impl Drop for UserspaceBackend {
     fn drop(&mut self) {
-        let _ = self.down();
+        let Some(running) = self.running.take() else {
+            return;
+        };
+        let runtime = self.runtime.clone();
+        let stop = move || runtime.block_on(running.device.stop());
+        if Handle::try_current().is_ok() {
+            std::thread::spawn(stop);
+        } else {
+            stop();
+        }
     }
 }
 
@@ -203,6 +206,7 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
     use gotatun::packet::{Ip, Packet, PacketBufPool};
     use gotatun::tun::MtuWatcher;
     use gotatun::udp::channel::new_udp_tun_channel;
@@ -249,7 +253,7 @@ mod tests {
     #[test]
     fn private_key_matches_the_generated_public_key() {
         let keys = WireGuardKeys::generate();
-        let secret = private_key(&keys).unwrap();
+        let secret = private_key(&keys);
         assert_eq!(
             STANDARD.encode(PublicKey::from(&secret).as_bytes()),
             keys.public_key_base64()
@@ -283,7 +287,7 @@ mod tests {
         let endpoint: SocketAddr = "203.0.113.9:51820".parse().unwrap();
         let peer = build_peer(&config(), endpoint).unwrap();
         let key = peer.public_key;
-        let device = start_device(udp, NullTun, NullTun, private_key(&keys).unwrap(), peer)
+        let device = start_device(udp, NullTun, NullTun, private_key(&keys), peer)
             .await
             .unwrap();
 

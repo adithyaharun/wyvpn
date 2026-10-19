@@ -96,8 +96,8 @@ pub fn verified_wintun() -> Result<PathBuf, Unavailable> {
         return Err(Unavailable::WintunMissing { path: shown });
     }
     match crate::openvpn::signature::verify_wintun(&path) {
-        Check::Pass | Check::Skip(_) => Ok(path),
-        Check::Fail(reason) => Err(Unavailable::WintunUntrusted {
+        Check::Pass => Ok(path),
+        Check::Skip(reason) | Check::Fail(reason) => Err(Unavailable::WintunUntrusted {
             path: shown,
             reason,
         }),

@@ -1890,6 +1890,19 @@ mod tests {
         }
 
         #[tokio::test(start_paused = true)]
+        async fn slow_registration_ends_in_its_own_error_before_the_watchdog() {
+            let mut wg = WgRig::new();
+            *wg.fakes.register_delay.lock().unwrap() = Duration::from_secs(3600);
+            wg.start().await;
+            let started = Instant::now();
+            let error = wg.rig.until(ConnectionState::Error).await.unwrap();
+            assert_eq!(error.code, ErrorCode::Timeout);
+            assert_eq!(error.message, "registration request timed out");
+            assert!(started.elapsed() < WATCHDOG);
+            assert_eq!(wg.fakes.backend_count(), 0);
+        }
+
+        #[tokio::test(start_paused = true)]
         async fn an_unavailable_backend_is_an_actionable_error() {
             let mut wg = WgRig::new();
             wg.fakes.unavailable.store(true, Ordering::SeqCst);

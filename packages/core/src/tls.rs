@@ -86,11 +86,16 @@ pub fn pin_key(host: &str, port: u16) -> String {
 pub enum TlsPolicy {
     Verify,
     TrustOnFirstUse { pins: Pins },
+    Strict { pins: Pins },
 }
 
 impl TlsPolicy {
     pub fn pinned(pins: Pins) -> Self {
         Self::TrustOnFirstUse { pins }
+    }
+
+    pub fn strict(pins: Pins) -> Self {
+        Self::Strict { pins }
     }
 
     pub fn first_use() -> Self {
@@ -176,11 +181,15 @@ impl ServerCertVerifier for PinningVerifier {
             ocsp_response,
             now,
         );
-        let TlsPolicy::TrustOnFirstUse { pins } = &self.policy else {
-            if roots.is_ok() {
-                self.record(key, fingerprint, true);
+        let (pins, strict) = match &self.policy {
+            TlsPolicy::Verify => {
+                if roots.is_ok() {
+                    self.record(key, fingerprint, true);
+                }
+                return roots;
             }
-            return roots;
+            TlsPolicy::TrustOnFirstUse { pins } => (pins, false),
+            TlsPolicy::Strict { pins } => (pins, true),
         };
         if let Some(pin) = pins.get(&key) {
             if *pin != fingerprint {
@@ -192,6 +201,17 @@ impl ServerCertVerifier for PinningVerifier {
             let verified = roots.is_ok();
             self.record(key, fingerprint, verified);
             return Ok(ServerCertVerified::assertion());
+        }
+        if strict {
+            if matches!(server_name, ServerName::IpAddress(_)) {
+                return Err(rustls::Error::InvalidCertificate(
+                    CertificateError::ApplicationVerificationFailure,
+                ));
+            }
+            if roots.is_ok() {
+                self.record(key, fingerprint, true);
+            }
+            return roots;
         }
         let verified = roots.is_ok();
         self.record(key, fingerprint, verified);
@@ -314,7 +334,11 @@ mod tests {
     }
 
     async fn self_signed_server() -> TestServer {
-        let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+        self_signed_server_for("127.0.0.1").await
+    }
+
+    async fn self_signed_server_for(name: &str) -> TestServer {
+        let certified = rcgen::generate_simple_self_signed(vec![name.to_owned()]).unwrap();
         let der = certified.cert.der().clone();
         let fingerprint = Fingerprint::of_certificate(&der);
         let key = PrivateKeyDer::try_from(certified.signing_key.serialize_der()).unwrap();
@@ -479,5 +503,52 @@ mod tests {
             matching.execute(get(server.port)).await.unwrap().status,
             200
         );
+    }
+
+    #[tokio::test]
+    async fn strict_refuses_an_unpinned_self_signed_dns_host() {
+        let server = self_signed_server_for("localhost").await;
+        let client = ApiClient::new(TlsPolicy::strict(Pins::new())).unwrap();
+        let err = client
+            .execute(get_host("localhost", server.port))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Http(_)));
+    }
+
+    #[tokio::test]
+    async fn strict_refuses_an_unpinned_ip_even_with_a_valid_chain() {
+        let (server, roots) = ca_signed_server().await;
+        let client = ApiClient::with_verifier(TlsPolicy::strict(Pins::new()), roots);
+        let err = client.execute(get(server.port)).await.unwrap_err();
+        assert!(matches!(err, Error::Http(_)));
+    }
+
+    #[tokio::test]
+    async fn strict_accepts_pinned_self_signed_hosts() {
+        let server = self_signed_server().await;
+        let client =
+            ApiClient::new(TlsPolicy::strict(pins(server.port, server.fingerprint))).unwrap();
+        assert_eq!(client.execute(get(server.port)).await.unwrap().status, 200);
+
+        let named = self_signed_server_for("localhost").await;
+        let policy = TlsPolicy::strict(Pins::from([(
+            pin_key("localhost", named.port),
+            named.fingerprint,
+        )]));
+        let client = ApiClient::new(policy).unwrap();
+        let request = get_host("localhost", named.port);
+        assert_eq!(client.execute(request).await.unwrap().status, 200);
+    }
+
+    #[tokio::test]
+    async fn strict_pin_mismatch_is_reported() {
+        let server = self_signed_server().await;
+        let stale = Fingerprint::of_certificate(b"previous certificate");
+        let client = ApiClient::new(TlsPolicy::strict(pins(server.port, stale))).unwrap();
+        assert!(matches!(
+            client.execute(get(server.port)).await.unwrap_err(),
+            Error::CertificateChanged { .. }
+        ));
     }
 }

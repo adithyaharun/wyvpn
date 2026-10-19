@@ -66,7 +66,6 @@ pub mod fake {
     struct Inner {
         calls: Vec<Call>,
         responses: Vec<(String, String)>,
-        failures: Vec<(String, String)>,
     }
 
     #[derive(Clone, Default)]
@@ -81,12 +80,6 @@ pub mod fake {
             self.lock()
                 .responses
                 .push((line_part.to_owned(), output.to_owned()));
-        }
-
-        pub fn fail(&self, line_part: &str, message: &str) {
-            self.lock()
-                .failures
-                .push((line_part.to_owned(), message.to_owned()));
         }
 
         pub fn calls(&self) -> Vec<Call> {
@@ -107,10 +100,6 @@ pub mod fake {
             let line = call.line();
             let mut inner = self.lock();
             inner.calls.push(call);
-            if let Some((_, message)) = inner.failures.iter().find(|(part, _)| line.contains(part))
-            {
-                return Err(io::Error::other(message.clone()));
-            }
             Ok(inner
                 .responses
                 .iter()

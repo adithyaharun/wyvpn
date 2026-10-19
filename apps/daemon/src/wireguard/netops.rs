@@ -8,6 +8,7 @@ use super::exec::Exec;
 use crate::openvpn::binary::{BinaryError, Trust, resolve_trusted};
 
 pub const LINUX_TUN_PREFIX: &str = "wyvpn";
+#[cfg(windows)]
 pub const WINDOWS_ADAPTER_NAME: &str = "WyVPN";
 const MAX_NAME_LEN: usize = 15;
 const LINUX_IP: [&str; 4] = ["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip"];
@@ -429,6 +430,7 @@ pub fn remove_link_command(platform: Platform, programs: &Programs, dev: &str) -
     }
 }
 
+#[cfg(any(windows, test))]
 pub fn dns_commands(programs: &Programs, dev: &str, servers: &[IpAddr]) -> Vec<Cmd> {
     let mut commands = Vec::new();
     for family in ["ipv4", "ipv6"] {

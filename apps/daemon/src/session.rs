@@ -9,6 +9,7 @@ use tokio::time::{Instant, sleep, sleep_until, timeout};
 use wyvpn_core::Profile;
 use wyvpn_core::auth::openvpn_credentials;
 use wyvpn_core::ovpn::{RenderOptions, render};
+use wyvpn_core::wireguard;
 use wyvpn_ipc::{
     ConnectionState, ConnectionStatus, ErrorBody, ErrorCode, Event, LogSource, Transport,
 };
@@ -16,10 +17,13 @@ use zeroize::Zeroizing;
 
 use crate::control::core_error;
 use crate::egress::Egress;
-use crate::launcher::{BoxFuture, LaunchRequest, Launched, Launcher, Running};
+use crate::launcher::{BoxFuture, LaunchRequest, Launched, Launcher, OpenVpnRequest, Running};
 use crate::log::without_control;
 use crate::openvpn::management::TunnelEvent;
 use crate::state::{State, StoredProfile};
+use crate::wireguard::launcher::WireGuardRequest;
+use crate::wireguard::launcher::device_info;
+use crate::wireguard::register::RegisterError;
 
 const WATCHDOG: Duration = Duration::from_secs(60);
 const BACKOFF: [Duration; 5] = [
@@ -195,6 +199,7 @@ impl Manager {
             launcher: Arc::clone(&self.launcher),
             token: held.token,
             stored,
+            transport: held.transport,
             pin,
             reconnect,
             commands: inbox,
@@ -304,7 +309,26 @@ fn publish_all(state: &State, event: Option<Event>) {
     }
 }
 
-pub fn launch_request(profile: &Profile, pin: Option<&str>) -> Result<LaunchRequest, ErrorBody> {
+pub fn launch_request(
+    stored: &StoredProfile,
+    transport: Transport,
+    pin: Option<&str>,
+) -> Result<LaunchRequest, ErrorBody> {
+    match transport {
+        Transport::OpenVpn => openvpn_request(&stored.profile, pin).map(LaunchRequest::OpenVpn),
+        Transport::WireGuard => {
+            wireguard::ensure_registrable(&stored.profile, pin).map_err(|err| core_error(&err))?;
+            Ok(LaunchRequest::WireGuard(Box::new(WireGuardRequest {
+                profile: stored.profile.clone(),
+                pins: stored.tls_pins.clone(),
+                pin: pin.map(|pin| Zeroizing::new(pin.to_owned())),
+                device: device_info(),
+            })))
+        }
+    }
+}
+
+fn openvpn_request(profile: &Profile, pin: Option<&str>) -> Result<OpenVpnRequest, ErrorBody> {
     let config = render(
         profile,
         &RenderOptions {
@@ -314,7 +338,7 @@ pub fn launch_request(profile: &Profile, pin: Option<&str>) -> Result<LaunchRequ
     )
     .map_err(|err| core_error(&err))?;
     let credentials = openvpn_credentials(profile, pin, None).map_err(|err| core_error(&err))?;
-    Ok(LaunchRequest {
+    Ok(OpenVpnRequest {
         config,
         credentials,
     })
@@ -323,6 +347,7 @@ pub fn launch_request(profile: &Profile, pin: Option<&str>) -> Result<LaunchRequ
 enum Attempt {
     Stopped,
     AuthFailed,
+    Refused(ErrorBody),
     Lost { network_changed: bool },
     Failed(ErrorBody),
 }
@@ -337,6 +362,7 @@ struct Session {
     launcher: Arc<dyn Launcher>,
     token: u64,
     stored: StoredProfile,
+    transport: Transport,
     pin: Option<Zeroizing<String>>,
     reconnect: bool,
     commands: mpsc::UnboundedReceiver<Command>,
@@ -386,6 +412,7 @@ fn clear_link(status: &mut ConnectionStatus) {
     status.local_ip = None;
     status.server_endpoint = None;
     status.connected_since = None;
+    status.last_handshake = None;
     status.rx_bytes = 0;
     status.tx_bytes = 0;
 }
@@ -447,6 +474,7 @@ impl Session {
                         "the server rejected the credentials",
                     ));
                 }
+                Attempt::Refused(error) => return Final::Failed(error),
                 Attempt::Lost { network_changed } => {
                     if !self.reconnect {
                         self.note("reconnect is off");
@@ -513,7 +541,8 @@ impl Session {
     async fn attempt(&mut self) -> Attempt {
         let deadline = Instant::now() + WATCHDOG;
         let request = match launch_request(
-            &self.stored.profile,
+            &self.stored,
+            self.transport,
             self.pin.as_ref().map(|pin| pin.as_str()),
         ) {
             Ok(request) => request,
@@ -543,6 +572,15 @@ impl Session {
         } = match launched {
             Ok(launched) => launched,
             Err(err) => {
+                if let Some(refusal) = err.downcast_ref::<RegisterError>() {
+                    let body = refusal.to_body();
+                    self.note(&visible(&body.message));
+                    return if refusal.is_terminal() {
+                        Attempt::Refused(body)
+                    } else {
+                        Attempt::Failed(body)
+                    };
+                }
                 tracing::warn!(profile = %self.stored.id, error = %format!("{err:#}"), "cannot start the tunnel");
                 self.note(&format!(
                     "cannot start the tunnel: {}",
@@ -597,6 +635,7 @@ impl Session {
                             });
                         }
                     }
+                    Some(TunnelEvent::Handshake(at)) => self.state.record_handshake(&id, at),
                     Some(TunnelEvent::State { .. }) => {}
                     Some(TunnelEvent::AuthFailed) => break Attempt::AuthFailed,
                     Some(TunnelEvent::Fatal(message)) => {
@@ -1693,5 +1732,171 @@ mod tests {
         rig.until(ConnectionState::Connected).await;
         assert!(!rig.state.sessions.close_if_restartable(true));
         assert!(!rig.state.sessions.closed.load(Ordering::SeqCst));
+    }
+
+    mod wireguard {
+        use std::sync::atomic::Ordering;
+
+        use super::*;
+        use crate::wireguard::launcher::testing::Fakes;
+
+        struct WgRig {
+            rig: Rig,
+            fakes: Arc<Fakes>,
+        }
+
+        impl WgRig {
+            fn new() -> Self {
+                let fakes = Arc::new(Fakes::new());
+                let launcher = Arc::new(fakes.launcher());
+                let rig = Rig::wrapping(&[], |_| launcher);
+                Self { rig, fakes }
+            }
+
+            async fn start(&self) {
+                let connect = self
+                    .rig
+                    .call(Request::Connect {
+                        profile_id: A.into(),
+                        transport: Some(Transport::WireGuard),
+                        auto_reconnect: None,
+                    })
+                    .await;
+                assert_eq!(connect, Outcome::Result(Response::Ok));
+                assert_eq!(self.rig.submit(A).await, Outcome::Result(Response::Ok));
+            }
+
+            async fn backend(&self, index: usize) {
+                while self.fakes.backend_count() <= index {
+                    sleep(Duration::from_millis(10)).await;
+                }
+                self.fakes.handshake(index, 100, 200);
+            }
+
+            async fn connected(&mut self, index: usize) {
+                if index == 0 {
+                    self.start().await;
+                }
+                self.backend(index).await;
+                self.rig.until(ConnectionState::Connected).await;
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn connects_reports_status_and_stops_cleanly() {
+            let mut wg = WgRig::new();
+            wg.connected(0).await;
+            let status = wg.rig.status(A);
+            assert_eq!(status.transport, Some(Transport::WireGuard));
+            assert_eq!(status.tunnel_ip.as_deref(), Some("10.200.0.5"));
+            assert_eq!(status.server_endpoint.as_deref(), Some("203.0.113.9:51820"));
+            assert!(status.last_handshake.is_some());
+            assert!(status.connected_since.is_some());
+
+            let stats = wg.rig.next_stats().await;
+            assert_eq!(stats, (100, 200));
+
+            assert_eq!(wg.rig.disconnect(A).await, Outcome::Result(Response::Ok));
+            wg.rig.until(ConnectionState::Disconnected).await;
+            wg.fakes
+                .backend(0)
+                .with(|record| assert_eq!(record.downs, 1));
+            assert!(
+                wg.fakes
+                    .net
+                    .log()
+                    .contains(&"del 10.0.0.0/8 dev fake0".to_owned())
+            );
+            assert_eq!(wg.fakes.dns.log().last().unwrap(), "restore");
+            assert_eq!(wg.fakes.live_sessions(), 0);
+            assert!(wg.rig.idle());
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn keepalive_failure_reconnects_with_a_new_key() {
+            let mut wg = WgRig::new();
+            wg.fakes.pinger.push(Ok(true));
+            wg.fakes.pinger.push(Ok(false));
+            wg.connected(0).await;
+            wg.rig.until(ConnectionState::Connecting).await;
+            let lost = Instant::now();
+            assert_eq!(wg.rig.status(A).last_handshake, None);
+
+            wg.backend(1).await;
+            wg.rig.until(ConnectionState::Connected).await;
+            assert!(lost.elapsed() >= BACKOFF[0]);
+            assert_eq!(wg.fakes.registrations.load(Ordering::SeqCst), 2);
+            let key = |index| {
+                wg.fakes
+                    .backend(index)
+                    .with(|r| r.public_keys_seen[0].clone())
+            };
+            assert_ne!(key(0), key(1));
+            wg.fakes
+                .backend(0)
+                .with(|record| assert_eq!(record.downs, 1));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_denial_while_reconnecting_ends_the_session_without_retry() {
+            let mut wg = WgRig::new();
+            wg.fakes.pinger.push(Ok(true));
+            wg.fakes.pinger.push(Ok(false));
+            wg.connected(0).await;
+            wg.fakes.deny.store(true, Ordering::SeqCst);
+            let error = wg.rig.until(ConnectionState::Error).await.unwrap();
+            assert_eq!(error.code, ErrorCode::AuthFailed);
+            assert!(error.message.contains("no access"), "{}", error.message);
+            quiet_for(Duration::from_secs(300)).await;
+            assert_eq!(wg.fakes.registrations.load(Ordering::SeqCst), 2);
+            assert!(wg.rig.idle());
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_network_change_restarts_the_tunnel_without_backoff() {
+            let mut wg = WgRig::new();
+            wg.connected(0).await;
+            assert_eq!(wg.rig.status(A).local_ip.as_deref(), Some(LOCAL));
+            wg.rig.egress.set("10.1.1.5");
+            wg.rig.until(ConnectionState::Connecting).await;
+            let changed = Instant::now();
+            wg.backend(1).await;
+            wg.rig.until(ConnectionState::Connected).await;
+            assert!(changed.elapsed() < BACKOFF[0]);
+            assert_eq!(wg.rig.status(A).local_ip.as_deref(), Some("10.1.1.5"));
+            wg.fakes
+                .backend(0)
+                .with(|record| assert_eq!(record.downs, 1));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn no_handshake_fails_with_a_timeout_before_the_watchdog() {
+            let mut wg = WgRig::new();
+            wg.start().await;
+            let started = Instant::now();
+            let error = wg.rig.until(ConnectionState::Error).await.unwrap();
+            assert_eq!(error.code, ErrorCode::Server);
+            assert!(
+                error.message.contains("handshake timeout"),
+                "{}",
+                error.message
+            );
+            assert!(started.elapsed() < WATCHDOG);
+            wg.fakes
+                .backend(0)
+                .with(|record| assert_eq!(record.downs, 1));
+            quiet_for(Duration::from_secs(300)).await;
+            assert!(wg.rig.idle());
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn an_unavailable_backend_is_an_actionable_error() {
+            let mut wg = WgRig::new();
+            wg.fakes.unavailable.store(true, Ordering::SeqCst);
+            wg.start().await;
+            let error = wg.rig.until(ConnectionState::Error).await.unwrap();
+            assert!(error.message.contains("root"), "{}", error.message);
+            assert_eq!(wg.fakes.registrations.load(Ordering::SeqCst), 0);
+        }
     }
 }

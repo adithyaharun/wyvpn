@@ -20,8 +20,10 @@ pub enum Unavailable {
     TunDeviceUnusable(io::Error),
     #[error("a network tool is unusable: {0}")]
     Tool(#[from] ToolError),
+    #[cfg(any(windows, test))]
     #[error("wintun.dll is missing at {path}; reinstall WyVPN")]
     WintunMissing { path: String },
+    #[cfg(any(windows, test))]
     #[error("wintun.dll at {path} is not trusted ({reason}); reinstall WyVPN")]
     WintunUntrusted { path: String, reason: String },
 }

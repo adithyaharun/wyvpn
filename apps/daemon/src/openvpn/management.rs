@@ -25,6 +25,7 @@ pub enum TunnelEvent {
         rx: u64,
         tx: u64,
     },
+    Handshake(u64),
     AuthFailed,
     Fatal(String),
     Log(String),

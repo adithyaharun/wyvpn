@@ -102,17 +102,20 @@ mod native {
     }
 }
 
+#[cfg(any(windows, test))]
 pub struct AdapterDns<E> {
     exec: E,
     programs: super::netops::Programs,
 }
 
+#[cfg(any(windows, test))]
 impl<E: super::exec::Exec> AdapterDns<E> {
     pub fn new(exec: E, programs: super::netops::Programs) -> Self {
         Self { exec, programs }
     }
 }
 
+#[cfg(any(windows, test))]
 impl<E: super::exec::Exec> DnsControl for AdapterDns<E> {
     fn apply(&mut self, dev: &str, dns: &TunnelDns) -> io::Result<()> {
         if !super::netops::valid_name(dev) {

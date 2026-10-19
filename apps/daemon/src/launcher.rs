@@ -10,12 +10,18 @@ use wyvpn_core::auth::OpenVpnCredentials;
 use crate::openvpn::binary;
 use crate::openvpn::management::TunnelEvent;
 use crate::openvpn::process::{DEFAULT_STOP_TIMEOUT, HookCommand, StartOptions, Tunnel};
+use crate::wireguard::launcher::{WireGuardLauncher, WireGuardRequest};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-pub struct LaunchRequest {
+pub struct OpenVpnRequest {
     pub config: Secret,
     pub credentials: Option<OpenVpnCredentials>,
+}
+
+pub enum LaunchRequest {
+    OpenVpn(OpenVpnRequest),
+    WireGuard(Box<WireGuardRequest>),
 }
 
 pub struct Launched {
@@ -35,18 +41,20 @@ pub struct TunnelLauncher {
     data_dir: PathBuf,
     binary_path: Option<PathBuf>,
     hook: Option<HookCommand>,
+    wireguard: WireGuardLauncher,
 }
 
 impl TunnelLauncher {
     pub fn new(data_dir: PathBuf, binary_path: Option<PathBuf>, hook: Option<HookCommand>) -> Self {
         Self {
+            wireguard: WireGuardLauncher::system(data_dir.clone()),
             data_dir,
             binary_path,
             hook,
         }
     }
 
-    async fn start(&self, request: LaunchRequest) -> anyhow::Result<Launched> {
+    async fn start(&self, request: OpenVpnRequest) -> anyhow::Result<Launched> {
         let path = self.binary_path.clone();
         let data_dir = self.data_dir.clone();
         let binary =
@@ -87,7 +95,10 @@ impl TunnelLauncher {
 
 impl Launcher for TunnelLauncher {
     fn launch(&self, request: LaunchRequest) -> BoxFuture<'_, anyhow::Result<Launched>> {
-        Box::pin(self.start(request))
+        match request {
+            LaunchRequest::OpenVpn(request) => Box::pin(self.start(request)),
+            LaunchRequest::WireGuard(request) => self.wireguard.launch_request(*request),
+        }
     }
 }
 
@@ -290,8 +301,12 @@ pub mod fake {
                 }
                 let (events, receiver) = mpsc::channel(64);
                 let stopped = Arc::new(AtomicBool::new(false));
+                let credentials = match request {
+                    LaunchRequest::OpenVpn(request) => request.credentials,
+                    LaunchRequest::WireGuard(_) => None,
+                };
                 let _ = self.launched.send(Process {
-                    credentials: request.credentials,
+                    credentials,
                     events: events.clone(),
                     stopped: stopped.clone(),
                 });

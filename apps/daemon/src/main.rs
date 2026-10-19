@@ -17,7 +17,6 @@ mod state;
 mod storage;
 #[cfg(test)]
 mod testdata;
-#[expect(dead_code, reason = "backend not yet called by the session loop")]
 mod wireguard;
 
 use std::future::Future;

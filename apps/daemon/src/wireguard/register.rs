@@ -60,6 +60,13 @@ impl From<CoreError> for RegisterError {
 }
 
 impl RegisterError {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Denied { .. } | Self::InsecureKeepalive | Self::Core(CoreError::Unsupported(_))
+        )
+    }
+
     pub fn to_body(&self) -> ErrorBody {
         let mut body = match self {
             Self::Denied { .. } => ErrorBody::new(ErrorCode::AuthFailed, self.to_string()),

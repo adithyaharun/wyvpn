@@ -64,20 +64,7 @@ impl From<ErrorBody> for CmdError {
 }
 
 pub fn sanitize(text: &str) -> String {
-    let mut clean: String = text
-        .chars()
-        .filter(|c| !c.is_control() && !is_invisible_format(*c))
-        .take(MAX_MESSAGE_CHARS + 1)
-        .collect();
-    if clean.chars().count() > MAX_MESSAGE_CHARS {
-        clean = clean.chars().take(MAX_MESSAGE_CHARS).collect();
-        clean.push('…');
-    }
-    clean
-}
-
-fn is_invisible_format(c: char) -> bool {
-    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}')
+    wyvpn_ipc::sanitize_text(text, MAX_MESSAGE_CHARS)
 }
 
 #[cfg(test)]

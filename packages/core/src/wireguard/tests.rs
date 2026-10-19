@@ -310,7 +310,7 @@ fn config_parses_documented_fields() {
     let config = WireGuardConfig::from_json(config_json(&wg_public_key_b64())).unwrap();
     assert_eq!(config.address.to_string(), "10.200.0.5/24");
     assert_eq!(config.address6.unwrap().to_string(), "fd00::5/64");
-    assert_eq!(config.endpoint(), "203.0.113.9:51820");
+    assert_eq!(config.endpoint().to_string(), "203.0.113.9:51820");
     assert_eq!(config.gateway, Ipv4Addr::new(10, 200, 0, 1));
     assert_eq!(config.mtu, Some(1420));
     assert_eq!(config.routes[0].network.to_string(), "0.0.0.0/0");
@@ -340,6 +340,19 @@ fn config_validation_rejects_bad_input() {
     assert!(mutate(&|v| v["address6"] = "10.0.0.1/24".into()).is_err());
     assert!(mutate(&|v| v["port"] = 0.into()).is_err());
     assert!(mutate(&|v| v["public_key"] = "AAAA".into()).is_err());
+    assert!(mutate(&|v| v["public_key"] = "not base64!".into()).is_err());
+    for bad in [
+        "",
+        "a b",
+        "-x.example",
+        "x..example",
+        "host/name",
+        "1.2.3.999",
+        "a\u{202e}b",
+    ] {
+        assert!(mutate(&|v| v["hostname"] = bad.into()).is_err(), "{bad:?}");
+    }
+    assert!(mutate(&|v| v["hostname6"] = "vpn.example".into()).is_err());
     assert!(mutate(&|v| v["routes"] = serde_json::json!([{"network": "::/0"}])).is_err());
     assert!(mutate(&|v| v["routes"] = serde_json::json!([{"network": "10.0.0.0/33"}])).is_err());
     let minimal = mutate(&|v| {
@@ -443,7 +456,7 @@ async fn registration_round_trip() {
         .await
         .unwrap();
     assert_eq!(session.config.address.to_string(), "10.200.0.5/24");
-    assert_eq!(session.config.public_key, wg_public_key_b64());
+    assert_eq!(session.config.public_key.to_string(), wg_public_key_b64());
     assert_eq!(session.keys.public_key_base64().len(), 44);
 }
 
@@ -455,11 +468,20 @@ async fn registration_walks_hosts_and_keeps_going_past_http_errors() {
         .respond_with(ResponseTemplate::new(429))
         .mount(&dead)
         .await;
-    let hosts = [dead.uri(), mock.uri()];
-    let hosts = format!("\"sync_hosts\": {}", serde_json::to_string(&hosts).unwrap());
-    let profile = profile_for(&secret, &[&hosts]);
+    let hosts = vec![dead.uri(), mock.uri()];
+    let profile = profile_for(&secret, &[]);
     let device = device();
-    assert!(register(&client(), &profile, &input(&device)).await.is_ok());
+    assert!(
+        register_with_hosts(
+            &client(),
+            &hosts,
+            &profile,
+            &input(&device),
+            REGISTER_TIMEOUT
+        )
+        .await
+        .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -552,4 +574,232 @@ async fn keepalive_round_trip_uses_put() {
     let alive = pending.finish(&response).unwrap();
     assert!(alive.status);
     assert_eq!(alive.timestamp, 1_760_000_000);
+}
+
+#[test]
+fn hosts_list_sync_hosts_before_remotes_and_apply_port_rules() {
+    let server = SecretKey::generate(&mut OsRng);
+    let hosts = "\"sync_hosts\": [\"https://sync-a.example:9443\", \"https://vpn.example.com\"]";
+    let body = "remote 2001:db8::7 1194 udp\n";
+    let key = format!(
+        "\"server_box_public_key\": \"{}\"",
+        STANDARD.encode(server.public_key().as_bytes())
+    );
+    let text = testdata::ovpn(&["\"wg\": true", hosts, &key], body);
+    let profile = Profile::parse(&text).unwrap();
+    assert_eq!(
+        registration_hosts(&profile),
+        [
+            "https://sync-a.example:9443",
+            "https://vpn.example.com",
+            "https://192.0.2.7",
+            "https://[2001:db8::7]",
+        ]
+    );
+}
+
+#[test]
+fn hosts_without_sync_hosts_fall_back_to_remotes() {
+    let profile = profile_for(&SecretKey::generate(&mut OsRng), &[]);
+    assert_eq!(
+        registration_hosts(&profile),
+        ["https://vpn.example.com", "https://192.0.2.7"]
+    );
+}
+
+#[test]
+fn endpoints_format_hosts_with_brackets_for_ipv6() {
+    let mut config = config_json(&wg_public_key_b64());
+    let parse = |host: &str, config: &mut serde_json::Value| {
+        config["hostname"] = host.into();
+        WireGuardConfig::from_json(config.clone())
+            .unwrap()
+            .endpoint()
+    };
+    assert_eq!(
+        parse("203.0.113.9", &mut config).to_string(),
+        "203.0.113.9:51820"
+    );
+    assert_eq!(
+        parse("2001:db8::9", &mut config).to_string(),
+        "[2001:db8::9]:51820"
+    );
+    assert_eq!(
+        parse("VPN.Example.com", &mut config).to_string(),
+        "vpn.example.com:51820"
+    );
+}
+
+#[tokio::test]
+async fn most_specific_error_wins_across_hosts() {
+    let secret = SecretKey::generate(&mut OsRng);
+    let profile = profile_for(&secret, &[]);
+    let device = device();
+    for order in [[429, 500], [500, 429]] {
+        let mut hosts = Vec::new();
+        let mut servers = Vec::new();
+        for code in order {
+            let server = MockServer::start().await;
+            Mock::given(wiremock::matchers::any())
+                .respond_with(ResponseTemplate::new(code))
+                .mount(&server)
+                .await;
+            hosts.push(server.uri());
+            servers.push(server);
+        }
+        let err = register_with_hosts(
+            &client(),
+            &hosts,
+            &profile,
+            &input(&device),
+            REGISTER_TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Status(429)), "{order:?}: {err:?}");
+    }
+    let err = register_with_hosts(&client(), &[], &profile, &input(&device), REGISTER_TIMEOUT)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::NoSyncHosts));
+}
+
+#[test]
+fn unusable_hosts_are_dropped_and_duplicates_collapsed() {
+    let server = SecretKey::generate(&mut OsRng);
+    let hosts = [
+        "http://plain.example",
+        "https://user:pw@creds.example",
+        "https://query.example/?x=1",
+        "https://frag.example/#f",
+        "https://path.example/api",
+        "https://127.0.0.1",
+        "https://169.254.1.1",
+        "https://0.0.0.0",
+        "https://224.0.0.1",
+        "https://[::1]",
+        "https://[fe80::1]",
+        "https://[::ffff:127.0.0.1]",
+        "https://[::ffff:0.0.0.0]",
+        "https://[::ffff:169.254.1.1]",
+        "https://[::127.0.0.1]",
+        "https://[64:ff9b::7f00:1]",
+        "https://255.255.255.255",
+        "https://0.1.2.3",
+        "https://localhost",
+        "https://LOCALHOST.",
+        "https://app.localhost",
+        "https://.",
+        "https://localhost../",
+        "https://app.localhost../",
+        "https://localhost.%2e/",
+        "not a url",
+        "https://Good.Example.:443/",
+        "https://Good.Example:443/",
+        "https://good.example",
+        "https://good.example:9443",
+        "https://203.0.113.4/",
+    ];
+    let hosts = format!("\"sync_hosts\": {}", serde_json::to_string(&hosts).unwrap());
+    let profile = profile_for(&server, &[&hosts]);
+    assert_eq!(
+        registration_hosts(&profile),
+        [
+            "https://good.example",
+            "https://good.example:9443",
+            "https://203.0.113.4",
+            "https://vpn.example.com",
+            "https://192.0.2.7",
+        ]
+    );
+}
+
+#[test]
+fn bracketed_ipv6_remotes_are_not_double_bracketed_and_hosts_are_capped() {
+    let server = SecretKey::generate(&mut OsRng);
+    let many: Vec<String> = (1..=12).map(|n| format!("https://h{n}.example")).collect();
+    let hosts = format!("\"sync_hosts\": {}", serde_json::to_string(&many).unwrap());
+    let key = format!(
+        "\"server_box_public_key\": \"{}\"",
+        STANDARD.encode(server.public_key().as_bytes())
+    );
+    let capped = Profile::parse(&testdata::ovpn(&["\"wg\": true", &hosts, &key], "")).unwrap();
+    let listed = registration_hosts(&capped);
+    assert_eq!(listed.len(), 8);
+    assert_eq!(listed[7], "https://h8.example");
+
+    let text = testdata::ovpn(&["\"wg\": true", &key], "remote [2001:db8::7] 1194 udp\n");
+    let profile = Profile::parse(&text).unwrap();
+    assert!(registration_hosts(&profile).contains(&"https://[2001:db8::7]".to_owned()));
+}
+
+#[test]
+fn inputs_redact_secrets_in_debug() {
+    let device = device();
+    let rendered = format!(
+        "{:?} {:?}",
+        RegistrationInput {
+            device: &device,
+            pin: Some("98765"),
+            auth_token: Some("abcdefghijklmnop"),
+        },
+        KeepaliveInput {
+            device: &device,
+            auth_token: Some("abcdefghijklmnop"),
+        }
+    );
+    assert!(!rendered.contains("98765") && !rendered.contains("abcdefghijklmnop"));
+    assert!(rendered.contains("<redacted>"));
+}
+
+#[test]
+fn dynamic_firewall_profiles_never_build_a_registration() {
+    let server = SecretKey::generate(&mut OsRng);
+    let profile = profile_for(&server, &["\"dynamic_firewall\": true"]);
+    let device = device();
+    match PendingRegistration::start(&profile, &input(&device)) {
+        Err(Error::Unsupported(Unsupported::DynamicFirewall)) => {}
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn dynamic_firewall_and_missing_pin_win_over_an_empty_host_list() {
+    let secret = SecretKey::generate(&mut OsRng);
+    let device = device();
+    let profile = profile_for(&secret, &["\"dynamic_firewall\": true"]);
+    let err = register_with_hosts(&client(), &[], &profile, &input(&device), REGISTER_TIMEOUT)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Unsupported(Unsupported::DynamicFirewall)
+    ));
+
+    let profile = profile_for(&secret, &[]);
+    let no_pin = RegistrationInput {
+        device: &device,
+        pin: None,
+        auth_token: None,
+    };
+    let err = register_with_hosts(&client(), &[], &profile, &no_pin, REGISTER_TIMEOUT)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::MissingCredential(_)));
+}
+
+#[test]
+fn best_error_prefers_specific_statuses_over_transport_errors() {
+    let mut best = BestError::default();
+    assert!(!best.is_specific());
+    best.record(Error::InvalidUri("x".into())).unwrap();
+    assert!(!best.is_specific());
+    best.record(Error::Status(500)).unwrap();
+    best.record(Error::InvalidUri("y".into())).unwrap();
+    assert!(matches!(best.0, Some(Error::Status(500))));
+    best.record(Error::Status(429)).unwrap();
+    best.record(Error::Status(500)).unwrap();
+    assert!(best.is_specific());
+    assert!(matches!(best.into_error(), Error::Status(429)));
+    assert!(BestError::default().record(Error::Decrypt).is_err());
 }

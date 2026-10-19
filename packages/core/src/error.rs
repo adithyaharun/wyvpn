@@ -46,6 +46,8 @@ pub enum Error {
         "server certificate changed (pinned {expected}, presented {actual}); explicit re-trust required"
     )]
     CertificateChanged { expected: String, actual: String },
+    #[error("{0} is an IP address without a pinned certificate; pin it before connecting")]
+    PinRequired(String),
     #[error("server returned status {0}")]
     Status(u16),
     #[error("server link or resource not found")]

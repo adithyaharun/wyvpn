@@ -163,6 +163,7 @@ pub fn core_error(err: &Error) -> ErrorBody {
         | Error::Tls(_)
         | Error::CertificateChanged { .. }
         | Error::Status(_)
+        | Error::PinRequired(_)
         | Error::NotFound
         | Error::Forbidden
         | Error::ResponseSignature
@@ -508,6 +509,20 @@ mod tests {
             pick_transport(&profile, Some(Transport::WireGuard)).unwrap(),
             Transport::WireGuard
         );
+    }
+
+    #[test]
+    fn wireguard_is_refused_for_profiles_without_it() {
+        let text = testdata::ovpn(&[("\"wg\": true", "\"wg\": false")]);
+        let profile = Profile::parse(&text).unwrap();
+        assert!(!profile.wireguard_available());
+        assert_eq!(pick_transport(&profile, None).unwrap(), Transport::OpenVpn);
+        assert_eq!(
+            pick_transport(&profile, Some(Transport::OpenVpn)).unwrap(),
+            Transport::OpenVpn
+        );
+        let err = pick_transport(&profile, Some(Transport::WireGuard)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidRequest);
     }
 
     struct Fixture {

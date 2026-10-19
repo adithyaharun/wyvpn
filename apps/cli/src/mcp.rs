@@ -181,6 +181,7 @@ mod tests {
                                     local_ip: None,
                                     server_endpoint: Some("vpn.example.com:51820\x1b[2J".into()),
                                     connected_since: Some(1),
+                                    last_handshake: None,
                                     rx_bytes: 10,
                                     tx_bytes: 20,
                                     error: Some(ErrorBody::new(ErrorCode::Server, "late\x1b[2J")),

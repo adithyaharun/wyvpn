@@ -6656,8 +6656,10 @@ name = "wyvpn-daemon"
 version = "0.1.2"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "clap",
  "core-foundation-sys",
+ "crypto_box",
  "nix",
  "security-framework-sys",
  "serde",
@@ -6669,8 +6671,10 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
  "windows-service",
  "windows-sys 0.61.2",
+ "wiremock",
  "wyvpn-core",
  "wyvpn-ipc",
  "zeroize",

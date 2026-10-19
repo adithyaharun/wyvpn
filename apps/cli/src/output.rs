@@ -5,20 +5,7 @@ use crate::view::StatusView;
 const MAX_FIELD_CHARS: usize = 256;
 
 pub fn sanitize(text: &str) -> String {
-    let mut clean: String = text
-        .chars()
-        .filter(|c| !c.is_control() && !is_invisible_format(*c))
-        .take(MAX_FIELD_CHARS + 1)
-        .collect();
-    if clean.chars().count() > MAX_FIELD_CHARS {
-        clean = clean.chars().take(MAX_FIELD_CHARS).collect();
-        clean.push('…');
-    }
-    clean
-}
-
-fn is_invisible_format(c: char) -> bool {
-    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}')
+    wyvpn_ipc::sanitize_text(text, MAX_FIELD_CHARS)
 }
 
 pub fn sanitize_profile(mut profile: ProfileSummary) -> ProfileSummary {

@@ -47,6 +47,12 @@ security-framework-sys = "2"
 core-foundation-sys = "0.8"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 codegen-units = 1
 lto = true

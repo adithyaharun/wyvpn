@@ -403,6 +403,79 @@ fn invalid_routes_are_skipped_and_the_rest_kept() {
     assert_eq!(config.routes6[0].network.to_string(), "fd00::/8");
 }
 
+fn base_config() -> serde_json::Value {
+    serde_json::json!({
+        "address": "10.200.0.5/24", "hostname": "203.0.113.9", "gateway": "10.200.0.1",
+        "port": 51820, "web_port": 443,
+        "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    })
+}
+
+#[test]
+fn keepalive_interval_is_clamped_to_five_through_120_seconds() {
+    let interval = |ping: u64| {
+        let mut value = base_config();
+        value["ping_interval"] = ping.into();
+        WireGuardConfig::from_json(value)
+            .unwrap()
+            .keepalive_interval()
+    };
+    assert_eq!(interval(0), Duration::from_secs(15));
+    assert_eq!(interval(1), Duration::from_secs(5));
+    assert_eq!(interval(30), Duration::from_secs(30));
+    assert_eq!(interval(100_000), Duration::from_secs(120));
+    assert_eq!(interval(u64::MAX), Duration::from_secs(120));
+}
+
+#[test]
+fn gateway_must_be_a_usable_address() {
+    for bad in [
+        "127.0.0.1",
+        "0.0.0.0",
+        "255.255.255.255",
+        "169.254.1.1",
+        "224.0.0.1",
+    ] {
+        let mut value = base_config();
+        value["gateway"] = bad.into();
+        assert!(WireGuardConfig::from_json(value).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn mtu_is_bounded_and_needs_1280_with_ipv6() {
+    let parse = |mtu: u32, v6: bool| {
+        let mut value = base_config();
+        value["mtu"] = mtu.into();
+        if v6 {
+            value["address6"] = "fd00::5/64".into();
+        }
+        WireGuardConfig::from_json(value)
+    };
+    assert!(parse(575, false).is_err());
+    assert!(parse(576, false).is_ok());
+    assert!(parse(9000, false).is_ok());
+    assert!(parse(9001, false).is_err());
+    assert!(parse(1279, true).is_err());
+    assert!(parse(1280, true).is_ok());
+    assert_eq!(parse(0, true).unwrap().mtu, None);
+}
+
+#[test]
+fn routes_are_capped_and_deduplicated() {
+    let mut value = base_config();
+    let many: Vec<_> = (0..2000u32)
+        .map(|i| serde_json::json!({"network": format!("10.{}.{}.0/24", i / 256, i % 256)}))
+        .collect();
+    value["routes"] = many.into();
+    value["routes6"] = serde_json::json!([
+        {"network": "fd00::/8"}, {"network": "fd00::/8"}, {"network": "fd00::/8", "metric": 3}
+    ]);
+    let config = WireGuardConfig::from_json(value).unwrap();
+    assert_eq!(config.routes.len(), 1024);
+    assert_eq!(config.routes6.len(), 1);
+}
+
 #[test]
 fn pss_salt_is_the_maximum_length() {
     let key = RsaPrivateKey::from_pkcs8_pem(testdata::KEY_PKCS8).unwrap();

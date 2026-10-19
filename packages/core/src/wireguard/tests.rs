@@ -803,3 +803,51 @@ fn best_error_prefers_specific_statuses_over_transport_errors() {
     assert!(matches!(best.into_error(), Error::Status(429)));
     assert!(BestError::default().record(Error::Decrypt).is_err());
 }
+
+#[test]
+fn hostname6_accepts_only_routable_ipv6() {
+    let parse = |value: &str| {
+        let mut json = config_json(&wg_public_key_b64());
+        json["hostname6"] = value.into();
+        WireGuardConfig::from_json(json)
+    };
+    assert_eq!(
+        parse("[2001:db8::9]").unwrap().hostname6,
+        Some("2001:db8::9".parse().unwrap())
+    );
+    for bad in [
+        "[[::1]]",
+        "[::1",
+        "::",
+        "ff02::1",
+        "[::ffff:255.255.255.255]",
+    ] {
+        assert!(parse(bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn request_path_ids_must_use_the_safe_charset() {
+    let server = SecretKey::generate(&mut OsRng);
+    let profile = profile_for(&server, &[]);
+    let device = device();
+    assert!(PendingRegistration::start(&profile, &input(&device)).is_ok());
+    for bad in ["../x", "a/b", "a b", "a%2f", "a?b", "a#b", "\u{e9}"] {
+        for field in ["organization_id", "user_id", "server_id"] {
+            let mut tampered = profile.clone();
+            let slot = match field {
+                "organization_id" => &mut tampered.header.organization_id,
+                "user_id" => &mut tampered.header.user_id,
+                _ => &mut tampered.header.server_id,
+            };
+            *slot = bad.into();
+            assert!(
+                matches!(
+                    PendingRegistration::start(&tampered, &input(&device)),
+                    Err(Error::MalformedHeader(_))
+                ),
+                "{field}={bad:?}"
+            );
+        }
+    }
+}

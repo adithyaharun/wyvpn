@@ -28,6 +28,7 @@ pub const REGISTER_TIMEOUT: Duration = Duration::from_secs(40);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(15);
 const BOX_NONCE_LEN: usize = 24;
 const INNER_NONCE_LEN: usize = 16;
+const PLAINTEXT_CAPACITY: usize = 4096;
 const MAX_REGISTRATION_HOSTS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +105,15 @@ impl fmt::Debug for KeepaliveInput<'_> {
     }
 }
 
+fn public_key_for(private: &[u8]) -> [u8; 32] {
+    let mut secret = SecretKey::from_slice(private).expect("private key is 32 bytes");
+    let public = *secret.public_key().as_bytes();
+    // SecretKey::drop leaves its raw bytes behind; overwrite them.
+    secret = SecretKey::from_bytes([0; 32]);
+    std::hint::black_box(&mut secret);
+    public
+}
+
 pub struct WireGuardKeys {
     private: Zeroizing<[u8; 32]>,
     public: [u8; 32],
@@ -111,11 +121,12 @@ pub struct WireGuardKeys {
 
 impl WireGuardKeys {
     pub fn generate() -> Self {
-        let mut private = Zeroizing::new(rng::random_bytes::<32>());
+        let mut private = Zeroizing::new([0u8; 32]);
+        rng::fill(&mut *private);
         private[0] &= 248;
         private[31] &= 127;
         private[31] |= 64;
-        let public = *SecretKey::from_bytes(*private).public_key().as_bytes();
+        let public = public_key_for(&private[..]);
         Self { private, public }
     }
 
@@ -550,6 +561,13 @@ fn sign_digest(key: &RsaPrivateKey, digest: &[u8]) -> Result<Vec<u8>> {
         .map_err(|_| Error::InvalidKey("profile private key cannot sign"))
 }
 
+fn valid_path_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 fn prepare(
     profile: &Profile,
     method: Method,
@@ -567,6 +585,11 @@ fn prepare(
     ] {
         if value.is_empty() {
             return Err(Error::MissingField(name));
+        }
+        if !valid_path_id(value) {
+            return Err(Error::MalformedHeader(format!(
+                "{name} contains characters outside A-Z, a-z, 0-9, _ and -"
+            )));
         }
     }
     let sync_token = header
@@ -614,7 +637,8 @@ fn prepare(
         public_address6: &device.public_address6,
         sso_token: "",
     };
-    let plaintext = Zeroizing::new(serde_json::to_vec(&inner).map_err(|_| Error::Encrypt)?);
+    let mut plaintext = Zeroizing::new(Vec::with_capacity(PLAINTEXT_CAPACITY));
+    serde_json::to_writer(&mut *plaintext, &inner).map_err(|_| Error::Encrypt)?;
 
     let ephemeral = SecretKey::generate(&mut OsRng);
     let box_nonce = rng::random_bytes::<BOX_NONCE_LEN>();
@@ -804,7 +828,7 @@ fn blocked_v4(ip: Ipv4Addr) -> bool {
         || ip.octets()[0] == 0
 }
 
-fn blocked_ip(ip: IpAddr) -> bool {
+pub(crate) fn blocked_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => blocked_v4(ip),
         IpAddr::V6(ip) => {

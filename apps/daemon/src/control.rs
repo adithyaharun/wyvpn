@@ -510,6 +510,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn wireguard_is_refused_for_profiles_without_it() {
+        let text = testdata::ovpn(&[("\"wg\": true", "\"wg\": false")]);
+        let profile = Profile::parse(&text).unwrap();
+        assert!(!profile.wireguard_available());
+        assert_eq!(pick_transport(&profile, None).unwrap(), Transport::OpenVpn);
+        assert_eq!(
+            pick_transport(&profile, Some(Transport::OpenVpn)).unwrap(),
+            Transport::OpenVpn
+        );
+        let err = pick_transport(&profile, Some(Transport::WireGuard)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidRequest);
+    }
+
     struct Fixture {
         _dir: tempfile::TempDir,
         state: Arc<State>,

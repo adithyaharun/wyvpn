@@ -570,7 +570,8 @@ mod tests {
     async fn strict_refuses_an_unpinned_self_signed_dns_host() {
         let server = self_signed_server_for("localhost").await;
         let client = ApiClient::new(TlsPolicy::strict(Pins::new()))
-            .unwrap();
+            .unwrap()
+            .without_resolver_filter();
         let err = client
             .execute(get_host("localhost", server.port))
             .await
@@ -601,7 +602,7 @@ mod tests {
             pin_key("localhost", named.port),
             named.fingerprint,
         )]));
-        let client = ApiClient::new(policy).unwrap();
+        let client = ApiClient::new(policy).unwrap().without_resolver_filter();
         let request = get_host("localhost", named.port);
         assert_eq!(client.execute(request).await.unwrap().status, 200);
     }

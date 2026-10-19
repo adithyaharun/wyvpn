@@ -17,6 +17,8 @@ mod state;
 mod storage;
 #[cfg(test)]
 mod testdata;
+#[allow(dead_code)]
+mod wireguard;
 
 use std::future::Future;
 use std::path::PathBuf;

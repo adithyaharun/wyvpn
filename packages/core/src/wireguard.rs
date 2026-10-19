@@ -24,10 +24,11 @@ use url::Url;
 use wyvpn_ipc::Transport;
 use zeroize::Zeroizing;
 
-const REGISTER_TIMEOUT: Duration = Duration::from_secs(40);
+pub const REGISTER_TIMEOUT: Duration = Duration::from_secs(40);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(15);
 const BOX_NONCE_LEN: usize = 24;
 const INNER_NONCE_LEN: usize = 16;
+const MAX_REGISTRATION_HOSTS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -71,17 +72,36 @@ pub struct DeviceInfo {
     pub public_address6: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct RegistrationInput<'a> {
     pub device: &'a DeviceInfo,
     pub pin: Option<&'a str>,
     pub auth_token: Option<&'a str>,
 }
 
-#[derive(Debug, Clone, Copy)]
+impl fmt::Debug for RegistrationInput<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegistrationInput")
+            .field("device", &self.device)
+            .field("pin", &self.pin.map(|_| "<redacted>"))
+            .field("auth_token", &self.auth_token.map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct KeepaliveInput<'a> {
     pub device: &'a DeviceInfo,
     pub auth_token: Option<&'a str>,
+}
+
+impl fmt::Debug for KeepaliveInput<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeepaliveInput")
+            .field("device", &self.device)
+            .field("auth_token", &self.auth_token.map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 pub struct WireGuardKeys {
@@ -173,11 +193,103 @@ pub struct Route {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Host {
+    Ip(IpAddr),
+    Dns(String),
+}
+
+fn valid_dns_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 63
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+impl FromStr for Host {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        if let Ok(ip) = s.trim_matches(['[', ']']).parse::<IpAddr>() {
+            return Ok(Self::Ip(ip));
+        }
+        let labels: Vec<&str> = s.split('.').collect();
+        let numeric_tail = labels
+            .last()
+            .is_some_and(|l| l.bytes().all(|b| b.is_ascii_digit()));
+        if s.len() > 253 || numeric_tail || !labels.iter().all(|l| valid_dns_label(l)) {
+            return Err(Error::InvalidResponse("hostname is not valid".into()));
+        }
+        Ok(Self::Dns(s.to_ascii_lowercase()))
+    }
+}
+
+impl fmt::Display for Host {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ip(ip) => write!(f, "{ip}"),
+            Self::Dns(name) => f.write_str(name),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    pub host: Host,
+    pub port: u16,
+}
+
+impl fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.host {
+            Host::Ip(IpAddr::V6(ip)) => write!(f, "[{ip}]:{}", self.port),
+            host => write!(f, "{host}:{}", self.port),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PeerKey([u8; 32]);
+
+impl PeerKey {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl FromStr for PeerKey {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let bytes = STANDARD
+            .decode(s)
+            .map_err(|_| Error::InvalidResponse("public_key is not valid base64".into()))?;
+        <[u8; 32]>::try_from(bytes)
+            .map(Self)
+            .map_err(|_| Error::InvalidResponse("public_key is not a 32 byte key".into()))
+    }
+}
+
+impl fmt::Display for PeerKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&STANDARD.encode(self.0))
+    }
+}
+
+impl fmt::Debug for PeerKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PeerKey({self})")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireGuardConfig {
     pub address: Cidr,
     pub address6: Option<Cidr>,
-    pub hostname: String,
-    pub hostname6: Option<String>,
+    pub hostname: Host,
+    pub hostname6: Option<IpAddr>,
     pub gateway: Ipv4Addr,
     pub gateway6: Option<Ipv6Addr>,
     pub port: u16,
@@ -186,7 +298,7 @@ pub struct WireGuardConfig {
     pub ping_timeout: u64,
     pub web_port: u16,
     pub web_no_ssl: bool,
-    pub public_key: String,
+    pub public_key: PeerKey,
     pub routes: Vec<Route>,
     pub routes6: Vec<Route>,
     pub dns_servers: Vec<IpAddr>,
@@ -234,23 +346,21 @@ impl WireGuardConfig {
         if address6.is_some_and(|a| !a.addr.is_ipv6()) {
             return Err(Error::InvalidResponse("address6 must be IPv6".into()));
         }
-        let hostname = required(raw.hostname, "hostname")?;
-        if hostname.is_empty() {
-            return Err(Error::InvalidResponse(
-                "configuration is missing hostname".into(),
-            ));
-        }
+        let hostname: Host = required(raw.hostname, "hostname")?.parse()?;
+        let hostname6 = raw
+            .hostname6
+            .filter(|h| !h.is_empty())
+            .map(|h| {
+                h.parse::<IpAddr>()
+                    .map_err(|_| Error::InvalidResponse("hostname6 is not an IP address".into()))
+            })
+            .transpose()?;
         let port = required(raw.port, "port")?;
         let web_port = required(raw.web_port, "web_port")?;
         if port == 0 || web_port == 0 {
             return Err(Error::InvalidResponse("port must be 1-65535".into()));
         }
-        let public_key = required(raw.public_key, "public_key")?;
-        if STANDARD.decode(&public_key).map(|k| k.len()) != Ok(32) {
-            return Err(Error::InvalidResponse(
-                "public_key is not a 32 byte key".into(),
-            ));
-        }
+        let public_key: PeerKey = required(raw.public_key, "public_key")?.parse()?;
         let routes = raw.routes.unwrap_or_default();
         let routes6 = raw.routes6.unwrap_or_default();
         if routes.iter().any(|r| !r.network.addr.is_ipv4())
@@ -264,7 +374,7 @@ impl WireGuardConfig {
             address,
             address6,
             hostname,
-            hostname6: raw.hostname6.filter(|h| !h.is_empty()),
+            hostname6,
             gateway: required(raw.gateway, "gateway")?,
             gateway6: raw.gateway6,
             port,
@@ -289,8 +399,11 @@ impl WireGuardConfig {
         })
     }
 
-    pub fn endpoint(&self) -> String {
-        format!("{}:{}", self.hostname, self.port)
+    pub fn endpoint(&self) -> Endpoint {
+        Endpoint {
+            host: self.hostname.clone(),
+            port: self.port,
+        }
     }
 
     pub fn keepalive_base_url(&self) -> String {
@@ -333,6 +446,10 @@ impl WireRequest {
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
+    }
+
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
     }
 
     pub fn into_http(self, base_url: &str) -> Result<HttpRequest> {
@@ -602,6 +719,9 @@ impl PendingRegistration {
         input: &RegistrationInput<'_>,
         keys: WireGuardKeys,
     ) -> Result<Self> {
+        if profile.header.dynamic_firewall {
+            return Err(Unsupported::DynamicFirewall.into());
+        }
         let password = password_for(&profile.header, input.pin, Transport::WireGuard)?;
         let prepared = prepare(
             profile,
@@ -645,17 +765,57 @@ impl PendingRegistration {
     }
 }
 
+fn usable_host(url: &Url) -> bool {
+    use url::Host as UrlHost;
+    let host_ok = match url.host() {
+        Some(UrlHost::Domain(_)) => true,
+        Some(UrlHost::Ipv4(ip)) => {
+            !(ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() || ip.is_multicast())
+        }
+        Some(UrlHost::Ipv6(ip)) => {
+            !(ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || (ip.segments()[0] & 0xffc0) == 0xfe80)
+        }
+        None => false,
+    };
+    host_ok
+        && url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && matches!(url.path(), "" | "/")
+}
+
 pub fn registration_hosts(profile: &Profile) -> Vec<String> {
-    let mut hosts = profile.header.sync_hosts.clone();
-    for remote in profile.remotes() {
-        let host = if remote.host.contains(':') {
-            format!("[{}]", remote.host)
+    let remotes = profile.remotes().into_iter().map(|remote| {
+        let host = remote.host.trim_matches(['[', ']']).to_owned();
+        if host.contains(':') {
+            format!("https://[{host}]")
         } else {
-            remote.host
-        };
-        let url = format!("https://{host}");
-        if !hosts.contains(&url) {
-            hosts.push(url);
+            format!("https://{host}")
+        }
+    });
+    let mut seen = Vec::new();
+    let mut hosts = Vec::new();
+    for raw in profile.header.sync_hosts.iter().cloned().chain(remotes) {
+        let Ok(url) = Url::parse(&raw) else { continue };
+        if !usable_host(&url) {
+            continue;
+        }
+        let key = (
+            url.host_str().map(str::to_ascii_lowercase),
+            url.port_or_known_default(),
+        );
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        hosts.push(url.origin().ascii_serialization());
+        if hosts.len() == MAX_REGISTRATION_HOSTS {
+            break;
         }
     }
     hosts
@@ -667,10 +827,28 @@ pub async fn register_at(
     profile: &Profile,
     input: &RegistrationInput<'_>,
 ) -> Result<WireGuardSession> {
+    register_at_with_timeout(client, base_url, profile, input, REGISTER_TIMEOUT).await
+}
+
+async fn register_at_with_timeout(
+    client: &ApiClient,
+    base_url: &str,
+    profile: &Profile,
+    input: &RegistrationInput<'_>,
+    timeout: Duration,
+) -> Result<WireGuardSession> {
     let pending = PendingRegistration::start(profile, input)?;
-    let request = pending.request().clone().into_http(base_url)?;
-    let response = client.execute(request).await?;
+    let mut request = pending.request().clone();
+    request.set_timeout(timeout);
+    let response = client.execute(request.into_http(base_url)?).await?;
     pending.finish(&response)
+}
+
+fn error_rank(err: &Error) -> u8 {
+    match err {
+        Error::Status(413 | 429) => 2,
+        _ => 1,
+    }
 }
 
 pub async fn register(
@@ -678,15 +856,33 @@ pub async fn register(
     profile: &Profile,
     input: &RegistrationInput<'_>,
 ) -> Result<WireGuardSession> {
-    let mut last = Error::NoSyncHosts;
-    for host in registration_hosts(profile) {
-        match register_at(client, &host, profile, input).await {
+    let hosts = registration_hosts(profile);
+    register_with_hosts(client, &hosts, profile, input, REGISTER_TIMEOUT).await
+}
+
+pub async fn register_with_hosts(
+    client: &ApiClient,
+    hosts: &[String],
+    profile: &Profile,
+    input: &RegistrationInput<'_>,
+    timeout: Duration,
+) -> Result<WireGuardSession> {
+    let mut last: Option<Error> = None;
+    for host in hosts {
+        match register_at_with_timeout(client, host, profile, input, timeout).await {
             Ok(session) => return Ok(session),
-            Err(err @ (Error::Http(_) | Error::Status(_) | Error::InvalidUri(_))) => last = err,
+            Err(err @ (Error::Http(_) | Error::Status(_) | Error::InvalidUri(_))) => {
+                if last
+                    .as_ref()
+                    .is_none_or(|kept| error_rank(&err) > error_rank(kept))
+                {
+                    last = Some(err);
+                }
+            }
             Err(err) => return Err(err),
         }
     }
-    Err(last)
+    Err(last.unwrap_or(Error::NoSyncHosts))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

@@ -396,6 +396,45 @@ pub const SOCKET_PATH: &str = "/var/run/wyvpn.sock";
 #[cfg(windows)]
 pub const SOCKET_PATH: &str = r"\\.\pipe\wyvpn";
 
+pub fn sanitize_text(text: &str, max_chars: usize) -> String {
+    let mut clean: String = text
+        .chars()
+        .filter(|c| !c.is_control() && !is_invisible(*c))
+        .take(max_chars.saturating_add(1))
+        .collect();
+    if clean.chars().count() > max_chars {
+        clean = clean.chars().take(max_chars).collect();
+        clean.push('…');
+    }
+    clean
+}
+
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{AD}'
+            | '\u{600}'..='\u{605}'
+            | '\u{61C}'
+            | '\u{6DD}'
+            | '\u{70F}'
+            | '\u{8E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,6 +738,37 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ProfileSummary>(profile).unwrap(),
             sample_profile()
+        );
+    }
+
+    #[test]
+    fn sanitize_text_strips_invisible_characters_and_caps_length() {
+        assert_eq!(
+            sanitize_text("a\x1b[31mred\x07\u{9b}2J\n\tb", 64),
+            "a[31mred2Jb"
+        );
+        assert_eq!(
+            sanitize_text("x\u{202E}evil\u{200B}\u{2028}\u{2029}y", 64),
+            "xevily"
+        );
+        assert_eq!(sanitize_text("a\u{E0041}\u{FEFF}b", 64), "ab");
+        let long = sanitize_text(&"a".repeat(1000), 10);
+        assert_eq!(long.chars().count(), 11);
+        assert!(long.ends_with('…'));
+        assert_eq!(sanitize_text(&"a".repeat(10), 10).chars().count(), 10);
+    }
+
+    #[test]
+    fn last_handshake_round_trips() {
+        let status = ConnectionStatus {
+            last_handshake: Some(1_760_000_000),
+            ..ConnectionStatus::disconnected("p1")
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["last_handshake"], 1_760_000_000_u64);
+        assert_eq!(
+            serde_json::from_value::<ConnectionStatus>(json).unwrap(),
+            status
         );
     }
 }

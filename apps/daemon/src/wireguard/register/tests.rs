@@ -458,10 +458,12 @@ async fn deadline_keeps_the_best_error_collected_so_far() {
         request: Duration::from_secs(10),
         total: Duration::from_millis(500),
     };
+    let started = std::time::Instant::now();
     let err = register_hosts(&client(), &hosts, &profile, &device(), Some(PIN), timeouts)
         .await
         .unwrap_err();
     assert!(matches!(err, RegisterError::ServerOffline), "{err:?}");
+    assert!(started.elapsed() < Duration::from_secs(2));
 }
 
 #[tokio::test]

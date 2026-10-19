@@ -184,6 +184,8 @@ pub struct ConnectionStatus {
     pub local_ip: Option<String>,
     pub server_endpoint: Option<String>,
     pub connected_since: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_handshake: Option<u64>,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -203,6 +205,7 @@ impl ConnectionStatus {
             local_ip: None,
             server_endpoint: None,
             connected_since: None,
+            last_handshake: None,
             rx_bytes: 0,
             tx_bytes: 0,
             error: None,
@@ -438,6 +441,7 @@ mod tests {
             tunnel_ip: Some("10.0.0.2".into()),
             server_endpoint: Some("vpn.example.com:51820".into()),
             connected_since: Some(1),
+            last_handshake: Some(2),
             ..ConnectionStatus::disconnected("p1")
         };
         assert_no_secret_keys(&serde_json::to_value(sample_profile()).unwrap());
@@ -681,6 +685,7 @@ mod tests {
 
         let mut status = serde_json::to_value(ConnectionStatus::disconnected("p1")).unwrap();
         assert!(status.get("local_ip").is_none());
+        assert!(status.get("last_handshake").is_none());
         status.as_object_mut().unwrap().remove("local_ip");
         assert!(
             serde_json::from_value::<ConnectionStatus>(status)

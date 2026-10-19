@@ -50,6 +50,7 @@ export interface ConnectionStatus {
   local_ip?: string | null;
   server_endpoint: string | null;
   connected_since: number | null;
+  last_handshake?: number | null;
   rx_bytes: number;
   tx_bytes: number;
   error?: ErrorBody | null;

@@ -645,7 +645,7 @@ impl PendingRegistration {
     }
 }
 
-fn candidate_hosts(profile: &Profile) -> Vec<String> {
+pub fn registration_hosts(profile: &Profile) -> Vec<String> {
     let mut hosts = profile.header.sync_hosts.clone();
     for remote in profile.remotes() {
         let host = if remote.host.contains(':') {
@@ -679,7 +679,7 @@ pub async fn register(
     input: &RegistrationInput<'_>,
 ) -> Result<WireGuardSession> {
     let mut last = Error::NoSyncHosts;
-    for host in candidate_hosts(profile) {
+    for host in registration_hosts(profile) {
         match register_at(client, &host, profile, input).await {
             Ok(session) => return Ok(session),
             Err(err @ (Error::Http(_) | Error::Status(_) | Error::InvalidUri(_))) => last = err,

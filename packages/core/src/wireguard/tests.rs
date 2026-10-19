@@ -553,3 +553,34 @@ async fn keepalive_round_trip_uses_put() {
     assert!(alive.status);
     assert_eq!(alive.timestamp, 1_760_000_000);
 }
+
+#[test]
+fn hosts_list_sync_hosts_before_remotes_and_apply_port_rules() {
+    let server = SecretKey::generate(&mut OsRng);
+    let hosts = "\"sync_hosts\": [\"https://sync-a.example:9443\", \"https://vpn.example.com\"]";
+    let body = "remote 2001:db8::7 1194 udp\n";
+    let key = format!(
+        "\"server_box_public_key\": \"{}\"",
+        STANDARD.encode(server.public_key().as_bytes())
+    );
+    let text = testdata::ovpn(&["\"wg\": true", hosts, &key], body);
+    let profile = Profile::parse(&text).unwrap();
+    assert_eq!(
+        registration_hosts(&profile),
+        [
+            "https://sync-a.example:9443",
+            "https://vpn.example.com",
+            "https://192.0.2.7",
+            "https://[2001:db8::7]",
+        ]
+    );
+}
+
+#[test]
+fn hosts_without_sync_hosts_fall_back_to_remotes() {
+    let profile = profile_for(&SecretKey::generate(&mut OsRng), &[]);
+    assert_eq!(
+        registration_hosts(&profile),
+        ["https://vpn.example.com", "https://192.0.2.7"]
+    );
+}

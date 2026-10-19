@@ -3,7 +3,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{CertificateError, ClientConfig, DigitallySignedStruct, SignatureScheme};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -75,11 +75,13 @@ pub type Pins = BTreeMap<String, Fingerprint>;
 
 pub fn pin_key(host: &str, port: u16) -> String {
     let host = host.trim_matches(['[', ']']);
-    if host.contains(':') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return match ip.to_canonical() {
+            std::net::IpAddr::V6(ip) => format!("[{ip}]:{port}"),
+            ip => format!("{ip}:{port}"),
+        };
     }
+    format!("{host}:{port}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +115,7 @@ pub struct TlsObservation {
 struct State {
     observed: HashMap<String, TlsObservation>,
     mismatch: HashMap<String, (Fingerprint, Fingerprint)>,
+    unpinned: HashSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -127,6 +130,10 @@ impl TlsState {
 
     pub(crate) fn observation(&self, key: &str) -> Option<TlsObservation> {
         self.lock().observed.get(key).copied()
+    }
+
+    pub(crate) fn take_unpinned(&self, key: &str) -> bool {
+        self.lock().unpinned.remove(key)
     }
 
     pub(crate) fn take_mismatch(&self, key: &str) -> Option<(Fingerprint, Fingerprint)> {
@@ -204,6 +211,7 @@ impl ServerCertVerifier for PinningVerifier {
         }
         if strict {
             if matches!(server_name, ServerName::IpAddress(_)) {
+                self.state.lock().unpinned.insert(key);
                 return Err(rustls::Error::InvalidCertificate(
                     CertificateError::ApplicationVerificationFailure,
                 ));
@@ -521,7 +529,10 @@ mod tests {
         let (server, roots) = ca_signed_server().await;
         let client = ApiClient::with_verifier(TlsPolicy::strict(Pins::new()), roots);
         let err = client.execute(get(server.port)).await.unwrap_err();
-        assert!(matches!(err, Error::Http(_)));
+        match err {
+            Error::PinRequired(host) => assert_eq!(host, pin_key("127.0.0.1", server.port)),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -550,5 +561,14 @@ mod tests {
             client.execute(get(server.port)).await.unwrap_err(),
             Error::CertificateChanged { .. }
         ));
+    }
+
+    #[test]
+    fn pin_keys_agree_for_mapped_ipv6() {
+        let canonical = pin_key("127.0.0.1", 443);
+        assert_eq!(pin_key("[::ffff:7f00:1]", 443), canonical);
+        assert_eq!(pin_key("::ffff:127.0.0.1", 443), canonical);
+        assert_eq!(pin_key("[2001:db8::1]", 9443), "[2001:db8::1]:9443");
+        assert_eq!(pin_key("Example.com", 443), "Example.com:443");
     }
 }

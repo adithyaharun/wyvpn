@@ -679,7 +679,19 @@ fn unusable_hosts_are_dropped_and_duplicates_collapsed() {
         "https://224.0.0.1",
         "https://[::1]",
         "https://[fe80::1]",
+        "https://[::ffff:127.0.0.1]",
+        "https://[::ffff:0.0.0.0]",
+        "https://[::ffff:169.254.1.1]",
+        "https://[::127.0.0.1]",
+        "https://[64:ff9b::7f00:1]",
+        "https://255.255.255.255",
+        "https://0.1.2.3",
+        "https://localhost",
+        "https://LOCALHOST.",
+        "https://app.localhost",
+        "https://.",
         "not a url",
+        "https://Good.Example.:443/",
         "https://Good.Example:443/",
         "https://good.example",
         "https://good.example:9443",
@@ -746,4 +758,45 @@ fn dynamic_firewall_profiles_never_build_a_registration() {
         Err(Error::Unsupported(Unsupported::DynamicFirewall)) => {}
         other => panic!("unexpected {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn dynamic_firewall_and_missing_pin_win_over_an_empty_host_list() {
+    let secret = SecretKey::generate(&mut OsRng);
+    let device = device();
+    let profile = profile_for(&secret, &["\"dynamic_firewall\": true"]);
+    let err = register_with_hosts(&client(), &[], &profile, &input(&device), REGISTER_TIMEOUT)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Unsupported(Unsupported::DynamicFirewall)
+    ));
+
+    let profile = profile_for(&secret, &[]);
+    let no_pin = RegistrationInput {
+        device: &device,
+        pin: None,
+        auth_token: None,
+    };
+    let err = register_with_hosts(&client(), &[], &profile, &no_pin, REGISTER_TIMEOUT)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::MissingCredential(_)));
+}
+
+#[test]
+fn best_error_prefers_specific_statuses_over_transport_errors() {
+    let mut best = BestError::default();
+    assert!(!best.is_specific());
+    best.record(Error::InvalidUri("x".into())).unwrap();
+    assert!(!best.is_specific());
+    best.record(Error::Status(500)).unwrap();
+    best.record(Error::InvalidUri("y".into())).unwrap();
+    assert!(matches!(best.0, Some(Error::Status(500))));
+    best.record(Error::Status(429)).unwrap();
+    best.record(Error::Status(500)).unwrap();
+    assert!(best.is_specific());
+    assert!(matches!(best.into_error(), Error::Status(429)));
+    assert!(BestError::default().record(Error::Decrypt).is_err());
 }

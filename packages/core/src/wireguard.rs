@@ -208,19 +208,44 @@ fn valid_dns_label(label: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+fn is_numeric_label(label: &str) -> bool {
+    label.bytes().all(|b| b.is_ascii_digit())
+        || label.get(..2).is_some_and(|p| p.eq_ignore_ascii_case("0x"))
+            && label[2..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn endpoint_ip_refused(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_unspecified() || v4.is_multicast() || v4.is_broadcast(),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => endpoint_ip_refused(IpAddr::V4(v4)),
+            None => v6.is_unspecified() || v6.is_multicast(),
+        },
+    }
+}
+
 impl FromStr for Host {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        if let Ok(ip) = s.trim_matches(['[', ']']).parse::<IpAddr>() {
-            return Ok(Self::Ip(ip));
+        let bad = || Error::InvalidResponse("hostname is not valid".into());
+        if let Some(inner) = s.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+            return match inner.parse::<Ipv6Addr>() {
+                Ok(ip) if !endpoint_ip_refused(IpAddr::V6(ip)) => Ok(Self::Ip(IpAddr::V6(ip))),
+                _ => Err(bad()),
+            };
+        }
+        if let Ok(ip) = s.parse::<IpAddr>() {
+            return if endpoint_ip_refused(ip) {
+                Err(bad())
+            } else {
+                Ok(Self::Ip(ip))
+            };
         }
         let labels: Vec<&str> = s.split('.').collect();
-        let numeric_tail = labels
-            .last()
-            .is_some_and(|l| l.bytes().all(|b| b.is_ascii_digit()));
+        let numeric_tail = labels.last().is_some_and(|l| is_numeric_label(l));
         if s.len() > 253 || numeric_tail || !labels.iter().all(|l| valid_dns_label(l)) {
-            return Err(Error::InvalidResponse("hostname is not valid".into()));
+            return Err(bad());
         }
         Ok(Self::Dns(s.to_ascii_lowercase()))
     }
@@ -289,7 +314,7 @@ pub struct WireGuardConfig {
     pub address: Cidr,
     pub address6: Option<Cidr>,
     pub hostname: Host,
-    pub hostname6: Option<IpAddr>,
+    pub hostname6: Option<Ipv6Addr>,
     pub gateway: Ipv4Addr,
     pub gateway6: Option<Ipv6Addr>,
     pub port: u16,
@@ -351,8 +376,9 @@ impl WireGuardConfig {
             .hostname6
             .filter(|h| !h.is_empty())
             .map(|h| {
-                h.parse::<IpAddr>()
-                    .map_err(|_| Error::InvalidResponse("hostname6 is not an IP address".into()))
+                h.trim_matches(['[', ']'])
+                    .parse::<Ipv6Addr>()
+                    .map_err(|_| Error::InvalidResponse("hostname6 is not an IPv6 address".into()))
             })
             .transpose()?;
         let port = required(raw.port, "port")?;
@@ -719,9 +745,7 @@ impl PendingRegistration {
         input: &RegistrationInput<'_>,
         keys: WireGuardKeys,
     ) -> Result<Self> {
-        if profile.header.dynamic_firewall {
-            return Err(Unsupported::DynamicFirewall.into());
-        }
+        ensure_registrable(profile, input.pin)?;
         let password = password_for(&profile.header, input.pin, Transport::WireGuard)?;
         let prepared = prepare(
             profile,
@@ -765,19 +789,43 @@ impl PendingRegistration {
     }
 }
 
+fn blocked_v4(ip: Ipv4Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+        || ip.octets()[0] == 0
+}
+
+fn blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => blocked_v4(ip),
+        IpAddr::V6(ip) => {
+            if let Some(v4) = ip.to_ipv4_mapped().or_else(|| ip.to_ipv4()) {
+                return blocked_v4(v4);
+            }
+            let s = ip.segments();
+            let nat64 = s[0] == 0x64 && s[1] == 0xff9b && s[2..6] == [0; 4];
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || (s[0] & 0xffc0) == 0xfe80
+                || nat64
+        }
+    }
+}
+
+fn blocked_domain(name: &str) -> bool {
+    name == "localhost" || name.ends_with(".localhost")
+}
+
 fn usable_host(url: &Url) -> bool {
     use url::Host as UrlHost;
     let host_ok = match url.host() {
-        Some(UrlHost::Domain(_)) => true,
-        Some(UrlHost::Ipv4(ip)) => {
-            !(ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() || ip.is_multicast())
-        }
-        Some(UrlHost::Ipv6(ip)) => {
-            !(ip.is_loopback()
-                || ip.is_unspecified()
-                || ip.is_multicast()
-                || (ip.segments()[0] & 0xffc0) == 0xfe80)
-        }
+        Some(UrlHost::Domain(name)) => !blocked_domain(&name.to_ascii_lowercase()),
+        Some(UrlHost::Ipv4(ip)) => !blocked_ip(IpAddr::V4(ip)),
+        Some(UrlHost::Ipv6(ip)) => !blocked_ip(IpAddr::V6(ip)),
         None => false,
     };
     host_ok
@@ -787,6 +835,19 @@ fn usable_host(url: &Url) -> bool {
         && url.query().is_none()
         && url.fragment().is_none()
         && matches!(url.path(), "" | "/")
+}
+
+fn trim_trailing_dot(url: &mut Url) -> bool {
+    let Some(url::Host::Domain(name)) = url.host() else {
+        return true;
+    };
+    match name.strip_suffix('.') {
+        Some(trimmed) => {
+            let trimmed = trimmed.to_owned();
+            !trimmed.is_empty() && url.set_host(Some(&trimmed)).is_ok()
+        }
+        None => true,
+    }
 }
 
 pub fn registration_hosts(profile: &Profile) -> Vec<String> {
@@ -801,8 +862,10 @@ pub fn registration_hosts(profile: &Profile) -> Vec<String> {
     let mut seen = Vec::new();
     let mut hosts = Vec::new();
     for raw in profile.header.sync_hosts.iter().cloned().chain(remotes) {
-        let Ok(url) = Url::parse(&raw) else { continue };
-        if !usable_host(&url) {
+        let Ok(mut url) = Url::parse(&raw) else {
+            continue;
+        };
+        if !trim_trailing_dot(&mut url) || !usable_host(&url) {
             continue;
         }
         let key = (
@@ -830,7 +893,7 @@ pub async fn register_at(
     register_at_with_timeout(client, base_url, profile, input, REGISTER_TIMEOUT).await
 }
 
-async fn register_at_with_timeout(
+pub async fn register_at_with_timeout(
     client: &ApiClient,
     base_url: &str,
     profile: &Profile,
@@ -846,9 +909,52 @@ async fn register_at_with_timeout(
 
 fn error_rank(err: &Error) -> u8 {
     match err {
-        Error::Status(413 | 429) => 2,
+        Error::Status(413 | 429) => 3,
+        Error::Status(_) | Error::PinRequired(_) => 2,
         _ => 1,
     }
+}
+
+fn is_host_failure(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Http(_) | Error::Status(_) | Error::InvalidUri(_) | Error::PinRequired(_)
+    )
+}
+
+#[derive(Debug, Default)]
+pub struct BestError(Option<Error>);
+
+impl BestError {
+    pub fn record(&mut self, err: Error) -> Result<()> {
+        if !is_host_failure(&err) {
+            return Err(err);
+        }
+        if self
+            .0
+            .as_ref()
+            .is_none_or(|kept| error_rank(&err) > error_rank(kept))
+        {
+            self.0 = Some(err);
+        }
+        Ok(())
+    }
+
+    pub fn is_specific(&self) -> bool {
+        self.0.as_ref().is_some_and(|err| error_rank(err) >= 2)
+    }
+
+    pub fn into_error(self) -> Error {
+        self.0.unwrap_or(Error::NoSyncHosts)
+    }
+}
+
+pub fn ensure_registrable(profile: &Profile, pin: Option<&str>) -> Result<()> {
+    if profile.header.dynamic_firewall {
+        return Err(Unsupported::DynamicFirewall.into());
+    }
+    password_for(&profile.header, pin, Transport::WireGuard)?;
+    Ok(())
 }
 
 pub async fn register(
@@ -867,22 +973,15 @@ pub async fn register_with_hosts(
     input: &RegistrationInput<'_>,
     timeout: Duration,
 ) -> Result<WireGuardSession> {
-    let mut last: Option<Error> = None;
+    ensure_registrable(profile, input.pin)?;
+    let mut best = BestError::default();
     for host in hosts {
         match register_at_with_timeout(client, host, profile, input, timeout).await {
             Ok(session) => return Ok(session),
-            Err(err @ (Error::Http(_) | Error::Status(_) | Error::InvalidUri(_))) => {
-                if last
-                    .as_ref()
-                    .is_none_or(|kept| error_rank(&err) > error_rank(kept))
-                {
-                    last = Some(err);
-                }
-            }
-            Err(err) => return Err(err),
+            Err(err) => best.record(err)?,
         }
     }
-    Err(last.unwrap_or(Error::NoSyncHosts))
+    Err(best.into_error())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

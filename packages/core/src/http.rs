@@ -136,6 +136,7 @@ impl ApiClient {
                     expected: expected.to_string(),
                     actual: actual.to_string(),
                 }),
+                None if self.state.take_unpinned(&key) => Err(Error::PinRequired(key)),
                 None => Err(err),
             },
         }

@@ -396,7 +396,7 @@ async fn slow_servers_hit_the_request_timeout() {
 async fn the_total_deadline_bounds_the_whole_host_walk() {
     let slow = MockServer::start().await;
     Mock::given(wiremock::matchers::any())
-        .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_millis(300)))
+        .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_secs(5)))
         .mount(&slow)
         .await;
     let rig = Rig::start(Reply::Status(500)).await;
@@ -416,13 +416,70 @@ async fn the_total_deadline_bounds_the_whole_host_walk() {
 }
 
 #[test]
-fn server_text_is_sanitized_in_error_bodies() {
+fn server_text_is_sanitized_and_capped_in_error_bodies() {
     let err = RegisterError::from(CoreError::InvalidResponse(
         "bad\u{1b}[2J\u{202e}text".into(),
     ));
     assert_eq!(err.to_body().message, "invalid server response: bad[2Jtext");
-    let long = RegisterError::from(CoreError::Rejected {
-        reason: Some("x".repeat(1000)),
+
+    let long = RegisterError::from(CoreError::InvalidResponse("x".repeat(1000)));
+    let message = long.to_body().message;
+    assert_eq!(message.chars().count(), 257);
+    assert!(message.ends_with('…'));
+
+    let denied = RegisterError::from(CoreError::Rejected {
+        reason: Some("y".repeat(1000)),
     });
-    assert!(long.to_body().message.chars().count() < 260);
+    match &denied {
+        RegisterError::Denied {
+            reason: Some(reason),
+        } => {
+            assert_eq!(reason.chars().count(), 257);
+            assert!(reason.ends_with('…'));
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    let message = denied.to_body().message;
+    assert_eq!(message.chars().count(), 257);
+    assert!(message.ends_with('…'));
+}
+
+#[tokio::test]
+async fn deadline_keeps_the_best_error_collected_so_far() {
+    let offline = Rig::start(Reply::Status(429)).await;
+    let slow = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_secs(5)))
+        .mount(&slow)
+        .await;
+    let hosts = vec![offline.server.uri(), slow.uri()];
+    let profile = offline.profile(&hosts, &[]);
+    let timeouts = Timeouts {
+        request: Duration::from_secs(10),
+        total: Duration::from_millis(500),
+    };
+    let err = register_hosts(&client(), &hosts, &profile, &device(), Some(PIN), timeouts)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RegisterError::ServerOffline), "{err:?}");
+}
+
+#[tokio::test]
+async fn missing_pin_is_reported_even_without_usable_hosts() {
+    let rig = Rig::start(Reply::Accept { web_no_ssl: false }).await;
+    let profile = rig.profile(&[], &[]);
+    let err = register_hosts(
+        &client(),
+        &[],
+        &profile,
+        &device(),
+        None,
+        Timeouts::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        RegisterError::Core(CoreError::MissingCredential(_))
+    ));
 }

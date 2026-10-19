@@ -17,7 +17,7 @@ mod state;
 mod storage;
 #[cfg(test)]
 mod testdata;
-#[allow(dead_code)]
+#[expect(dead_code, reason = "wired in stage 2")]
 mod wireguard;
 
 use std::future::Future;

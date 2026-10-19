@@ -7,6 +7,7 @@ use crypto_box::aead::{Aead, OsRng};
 use crypto_box::{Nonce, PublicKey, SalsaBox, SecretKey};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 use wyvpn_core::Secret;
+use wyvpn_core::Unsupported;
 use wyvpn_core::http::{ApiClient, HttpRequest, Method};
 use wyvpn_core::sign::hmac_base64;
 use wyvpn_core::tls::{Pins, TlsPolicy};
@@ -30,6 +31,7 @@ struct Peer {
     secret: SecretKey,
     reply: Reply,
     keys: Arc<Mutex<Vec<String>>>,
+    passwords: Arc<Mutex<Vec<String>>>,
 }
 
 fn config(web_no_ssl: bool) -> serde_json::Value {
@@ -69,9 +71,6 @@ fn envelope(
 
 impl Respond for Peer {
     fn respond(&self, request: &Request) -> ResponseTemplate {
-        if let Reply::Status(code) = self.reply {
-            return ResponseTemplate::new(code);
-        }
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
         let field = |name: &str| STANDARD.decode(body[name].as_str().unwrap()).unwrap();
         let client = PublicKey::from_slice(&field("public_key")).unwrap();
@@ -79,7 +78,10 @@ impl Respond for Peer {
             .decrypt(Nonce::from_slice(&field("nonce")), field("data").as_slice())
             .unwrap();
         let inner: serde_json::Value = serde_json::from_slice(&inner).unwrap();
-        assert_eq!(inner["password"], PIN);
+        self.passwords
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(inner["password"].as_str().unwrap().to_owned());
         self.keys
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -100,7 +102,7 @@ impl Respond for Peer {
                 &SecretKey::generate(&mut OsRng),
                 &serde_json::json!({"allow": true}),
             ),
-            Reply::Status(_) => unreachable!(),
+            Reply::Status(code) => return ResponseTemplate::new(*code),
         };
         ResponseTemplate::new(200).set_body_json(reply)
     }
@@ -110,18 +112,24 @@ struct Rig {
     server: MockServer,
     secret: SecretKey,
     keys: Arc<Mutex<Vec<String>>>,
+    passwords: Arc<Mutex<Vec<String>>>,
 }
 
 impl Rig {
     async fn start(reply: Reply) -> Self {
-        let secret = SecretKey::generate(&mut OsRng);
+        Self::start_with(reply, SecretKey::generate(&mut OsRng)).await
+    }
+
+    async fn start_with(reply: Reply, secret: SecretKey) -> Self {
         let keys = Arc::new(Mutex::new(Vec::new()));
+        let passwords = Arc::new(Mutex::new(Vec::new()));
         let server = MockServer::start().await;
         Mock::given(wiremock::matchers::path_regex("^/key/wg/"))
             .respond_with(Peer {
                 secret: SecretKey::from_bytes(secret.to_bytes()),
                 reply,
                 keys: keys.clone(),
+                passwords: passwords.clone(),
             })
             .mount(&server)
             .await;
@@ -129,6 +137,7 @@ impl Rig {
             server,
             secret,
             keys,
+            passwords,
         }
     }
 
@@ -164,6 +173,13 @@ impl Rig {
             .clone()
     }
 
+    fn seen_passwords(&self) -> Vec<String> {
+        self.passwords
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     async fn requests(&self) -> usize {
         self.server.received_requests().await.unwrap().len()
     }
@@ -188,24 +204,45 @@ fn device() -> DeviceInfo {
 }
 
 async fn run(profile: &Profile) -> Result<WireGuardSession, RegisterError> {
-    register(&client(), profile, &device(), Some(PIN)).await
+    let hosts = profile.header.sync_hosts.clone();
+    register_hosts(
+        &client(),
+        &hosts,
+        profile,
+        &device(),
+        Some(PIN),
+        Timeouts::default(),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn falls_back_to_the_next_host_with_a_fresh_key() {
-    let dead = Rig::start(Reply::Status(500)).await;
     let live = Rig::start(Reply::Accept { web_no_ssl: false }).await;
+    let dead = Rig::start_with(
+        Reply::Status(500),
+        SecretKey::from_bytes(live.secret.to_bytes()),
+    )
+    .await;
     let profile = live.profile(&[dead.server.uri(), live.server.uri()], &[]);
     let session = run(&profile).await.unwrap();
     assert_eq!(dead.requests().await, 1);
     assert_eq!(live.requests().await, 1);
-    assert_eq!(live.seen_keys(), [session.keys.public_key_base64()]);
+    let (dead_key, live_key) = (dead.seen_keys(), live.seen_keys());
+    assert_eq!(live_key, [session.keys.public_key_base64()]);
+    assert_eq!(dead_key.len(), 1);
+    assert_ne!(dead_key[0], live_key[0]);
+    assert_eq!(live.seen_passwords(), [PIN]);
 }
 
 #[tokio::test]
 async fn fails_only_after_every_host_fails() {
     let a = Rig::start(Reply::Status(500)).await;
-    let b = Rig::start(Reply::Status(429)).await;
+    let b = Rig::start_with(
+        Reply::Status(429),
+        SecretKey::from_bytes(a.secret.to_bytes()),
+    )
+    .await;
     let profile = a.profile(&[a.server.uri(), b.server.uri()], &[]);
     let err = run(&profile).await.unwrap_err();
     assert_eq!(a.requests().await, 1);
@@ -322,7 +359,9 @@ async fn production_client_refuses_plain_http() {
     let rig = Rig::start(Reply::Accept { web_no_ssl: false }).await;
     let profile = rig.profile(&[rig.server.uri()], &[]);
     let client = https_client(&Pins::new()).unwrap();
-    let err = register(&client, &profile, &device(), Some(PIN))
+    let hosts = profile.header.sync_hosts.clone();
+    let timeouts = Timeouts::default();
+    let err = register_hosts(&client, &hosts, &profile, &device(), Some(PIN), timeouts)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -330,4 +369,60 @@ async fn production_client_refuses_plain_http() {
         RegisterError::Core(CoreError::InsecureScheme)
     ));
     assert_eq!(rig.requests().await, 0);
+}
+
+#[tokio::test]
+async fn slow_servers_hit_the_request_timeout() {
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(5)))
+        .mount(&server)
+        .await;
+    let rig = Rig::start(Reply::Status(500)).await;
+    let profile = rig.profile(&[server.uri()], &[]);
+    let timeouts = Timeouts {
+        request: Duration::from_millis(100),
+        total: Duration::from_secs(30),
+    };
+    let hosts = profile.header.sync_hosts.clone();
+    let err = register_hosts(&client(), &hosts, &profile, &device(), Some(PIN), timeouts)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RegisterError::Timeout));
+    assert_eq!(err.to_body().code, ErrorCode::Timeout);
+}
+
+#[tokio::test]
+async fn the_total_deadline_bounds_the_whole_host_walk() {
+    let slow = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_millis(300)))
+        .mount(&slow)
+        .await;
+    let rig = Rig::start(Reply::Status(500)).await;
+    let hosts = vec![slow.uri(), slow.uri(), slow.uri()];
+    let profile = rig.profile(&hosts, &[]);
+    let timeouts = Timeouts {
+        request: Duration::from_secs(5),
+        total: Duration::from_millis(500),
+    };
+    let started = std::time::Instant::now();
+    let err = register_hosts(&client(), &hosts, &profile, &device(), Some(PIN), timeouts)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RegisterError::Timeout));
+    assert_eq!(err.to_body().code, ErrorCode::Timeout);
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn server_text_is_sanitized_in_error_bodies() {
+    let err = RegisterError::from(CoreError::InvalidResponse(
+        "bad\u{1b}[2J\u{202e}text".into(),
+    ));
+    assert_eq!(err.to_body().message, "invalid server response: bad[2Jtext");
+    let long = RegisterError::from(CoreError::Rejected {
+        reason: Some("x".repeat(1000)),
+    });
+    assert!(long.to_body().message.chars().count() < 260);
 }

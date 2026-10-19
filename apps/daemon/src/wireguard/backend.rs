@@ -1,14 +1,14 @@
 use std::time::Duration;
 
-use wyvpn_core::wireguard::{Cidr, WireGuardKeys};
+use wyvpn_core::wireguard::{Cidr, Endpoint, PeerKey, WireGuardKeys};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendConfig {
     pub address: Cidr,
     pub address6: Option<Cidr>,
     pub mtu: Option<u16>,
-    pub peer_public_key: String,
-    pub endpoint: String,
+    pub peer_public_key: PeerKey,
+    pub endpoint: Endpoint,
     pub allowed_ips: Vec<Cidr>,
 }
 
@@ -27,12 +27,16 @@ pub struct PeerStats {
 pub trait WgBackend: Send {
     fn up(&mut self, config: &BackendConfig, keys: &WireGuardKeys) -> anyhow::Result<Interface>;
     fn stats(&self) -> anyhow::Result<PeerStats>;
-    fn down(&mut self);
+    fn down(&mut self) -> anyhow::Result<()>;
 }
 
 #[cfg(test)]
 pub mod fake {
     use std::sync::{Arc, Mutex, PoisonError};
+
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    use wyvpn_core::wireguard::Host;
 
     use super::*;
 
@@ -44,6 +48,7 @@ pub mod fake {
         pub fail_up: Option<String>,
         pub stats: PeerStats,
         pub stats_fail: bool,
+        pub fail_down: bool,
         pub is_up: bool,
     }
 
@@ -101,11 +106,15 @@ pub mod fake {
             })
         }
 
-        fn down(&mut self) {
+        fn down(&mut self) -> anyhow::Result<()> {
             self.handle.with(|record| {
                 record.downs += 1;
                 record.is_up = false;
-            });
+                if record.fail_down {
+                    anyhow::bail!("teardown failed");
+                }
+                Ok(())
+            })
         }
     }
 
@@ -114,8 +123,11 @@ pub mod fake {
             address: "10.200.0.5/24".parse().unwrap(),
             address6: None,
             mtu: Some(1420),
-            peer_public_key: "peer".into(),
-            endpoint: "203.0.113.9:51820".into(),
+            peer_public_key: STANDARD.encode([7u8; 32]).parse().unwrap(),
+            endpoint: Endpoint {
+                host: Host::Ip("203.0.113.9".parse().unwrap()),
+                port: 51820,
+            },
             allowed_ips: vec!["10.0.0.0/8".parse().unwrap()],
         }
     }
@@ -139,12 +151,16 @@ pub mod fake {
         });
         assert_eq!(backend.stats().unwrap().rx_bytes, 10);
 
-        backend.down();
+        backend.down().unwrap();
         handle.with(|record| {
             assert_eq!(record.downs, 1);
             assert!(!record.is_up);
         });
         assert!(backend.stats().is_err());
+
+        handle.with(|record| record.fail_down = true);
+        assert!(backend.down().is_err());
+        handle.with(|record| assert_eq!(record.downs, 2));
     }
 
     #[test]

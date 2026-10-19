@@ -353,8 +353,7 @@ fn config_validation_rejects_bad_input() {
         assert!(mutate(&|v| v["hostname"] = bad.into()).is_err(), "{bad:?}");
     }
     assert!(mutate(&|v| v["hostname6"] = "vpn.example".into()).is_err());
-    assert!(mutate(&|v| v["routes"] = serde_json::json!([{"network": "::/0"}])).is_err());
-    assert!(mutate(&|v| v["routes"] = serde_json::json!([{"network": "10.0.0.0/33"}])).is_err());
+    assert!(mutate(&|v| v["routes"] = "10.0.0.0/8".into()).is_err());
     let minimal = mutate(&|v| {
         let map = v.as_object_mut().unwrap();
         for k in [
@@ -374,6 +373,34 @@ fn config_validation_rejects_bad_input() {
     assert_eq!(minimal.keepalive_interval(), Duration::from_secs(15));
     assert_eq!(mutate(&|v| v["mtu"] = 0.into()).unwrap().mtu, None);
     assert_eq!(Cidr::from_str("10.1.2.3").unwrap().prefix, 32);
+}
+
+#[test]
+fn invalid_routes_are_skipped_and_the_rest_kept() {
+    let mut value = serde_json::json!({
+        "address": "10.200.0.5/24", "hostname": "203.0.113.9", "gateway": "10.200.0.1",
+        "port": 51820, "web_port": 443,
+        "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    });
+    value["routes"] = serde_json::json!([
+        {"network": "10.0.0.0/8"},
+        {"network": "10.0.0.0/33"},
+        {"network": "::/0"},
+        {"network": "not a network"},
+        {"next_hop": "10.200.0.1"},
+        {"network": "172.16.0.0/12", "net_gateway": true}
+    ]);
+    value["routes6"] = serde_json::json!([{"network": "10.1.0.0/16"}, {"network": "fd00::/8"}]);
+    let config = WireGuardConfig::from_json(value).unwrap();
+    let v4: Vec<String> = config
+        .routes
+        .iter()
+        .map(|r| r.network.to_string())
+        .collect();
+    assert_eq!(v4, ["10.0.0.0/8", "172.16.0.0/12"]);
+    assert!(config.routes[1].net_gateway);
+    assert_eq!(config.routes6.len(), 1);
+    assert_eq!(config.routes6[0].network.to_string(), "fd00::/8");
 }
 
 #[test]

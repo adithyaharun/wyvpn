@@ -356,10 +356,22 @@ struct RawConfig {
     web_port: Option<u16>,
     web_no_ssl: Option<bool>,
     public_key: Option<String>,
-    routes: Option<Vec<Route>>,
-    routes6: Option<Vec<Route>>,
+    routes: Option<Vec<serde_json::Value>>,
+    routes6: Option<Vec<serde_json::Value>>,
     dns_servers: Option<Vec<IpAddr>>,
     search_domains: Option<Vec<String>>,
+}
+
+fn lenient_routes(values: Option<Vec<serde_json::Value>>, v6: bool) -> Vec<Route> {
+    let mut routes = Vec::new();
+    for (index, value) in values.unwrap_or_default().into_iter().enumerate() {
+        match serde_json::from_value::<Route>(value) {
+            Ok(route) if route.network.addr.is_ipv6() == v6 => routes.push(route),
+            Ok(_) => tracing::warn!(index, v6, "skipping a route of the wrong address family"),
+            Err(_) => tracing::warn!(index, v6, "skipping a route with an invalid network"),
+        }
+    }
+    routes
 }
 
 fn required<T>(value: Option<T>, name: &str) -> Result<T> {
@@ -404,15 +416,8 @@ impl WireGuardConfig {
             return Err(Error::InvalidResponse("port must be 1-65535".into()));
         }
         let public_key: PeerKey = required(raw.public_key, "public_key")?.parse()?;
-        let routes = raw.routes.unwrap_or_default();
-        let routes6 = raw.routes6.unwrap_or_default();
-        if routes.iter().any(|r| !r.network.addr.is_ipv4())
-            || routes6.iter().any(|r| !r.network.addr.is_ipv6())
-        {
-            return Err(Error::InvalidResponse(
-                "route has the wrong address family".into(),
-            ));
-        }
+        let routes = lenient_routes(raw.routes, false);
+        let routes6 = lenient_routes(raw.routes6, true);
         Ok(Self {
             address,
             address6,

@@ -200,7 +200,6 @@ fn pick_transport(profile: &Profile, requested: Option<Transport>) -> Result<Tra
             Err(invalid("profile does not support wireguard"))
         }
         Some(transport) => Ok(transport),
-        None if profile.wireguard_available() => Ok(Transport::WireGuard),
         None => Ok(Transport::OpenVpn),
     }
 }
@@ -498,6 +497,18 @@ mod tests {
     use super::*;
     use crate::admin::AdminConfig;
     use crate::state::MemoryProfiles;
+    use crate::testdata;
+
+    #[test]
+    fn unrequested_transport_defaults_to_openvpn() {
+        let profile = Profile::parse(testdata::PIN_PROFILE).unwrap();
+        assert!(profile.wireguard_available());
+        assert_eq!(pick_transport(&profile, None).unwrap(), Transport::OpenVpn);
+        assert_eq!(
+            pick_transport(&profile, Some(Transport::WireGuard)).unwrap(),
+            Transport::WireGuard
+        );
+    }
 
     struct Fixture {
         _dir: tempfile::TempDir,

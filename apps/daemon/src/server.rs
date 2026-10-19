@@ -631,7 +631,7 @@ mod tests {
         assert_eq!(statuses[0].state, ConnectionState::Connecting);
         assert_eq!(
             statuses[0].transport,
-            Some(transport.unwrap_or(Transport::WireGuard))
+            Some(transport.unwrap_or(Transport::OpenVpn))
         );
 
         let missing = error_of(client.call(submit_request(&summary.id, None)).await);
@@ -649,7 +649,7 @@ mod tests {
     async fn wireguard_connect_prompts_for_pin_then_is_not_implemented() {
         let harness = Harness::new().await;
         let mut client = harness.client().await;
-        let id = prompted(&harness, &mut client, None).await;
+        let id = prompted(&harness, &mut client, Some(Transport::WireGuard)).await;
 
         let done = error_of(client.call(submit_request(&id, Some("0000"))).await);
         assert_eq!(done.code, ErrorCode::NotImplemented);

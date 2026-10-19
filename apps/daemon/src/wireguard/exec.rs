@@ -1,5 +1,6 @@
 use std::io::{self, Read};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -29,19 +30,25 @@ impl Default for SystemExec {
     }
 }
 
-fn drain(pipe: Option<impl Read + Send + 'static>) -> Option<thread::JoinHandle<Vec<u8>>> {
+fn drain(pipe: Option<impl Read + Send + 'static>) -> Option<mpsc::Receiver<Vec<u8>>> {
     pipe.map(|mut pipe| {
+        let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             let mut bytes = Vec::new();
             let _ = pipe.read_to_end(&mut bytes);
-            bytes
-        })
+            let _ = sender.send(bytes);
+        });
+        receiver
     })
 }
 
-fn collected(handle: Option<thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
-    handle
-        .and_then(|handle| handle.join().ok())
+fn collected(receiver: Option<mpsc::Receiver<Vec<u8>>>, deadline: Instant) -> Vec<u8> {
+    receiver
+        .and_then(|receiver| {
+            receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .ok()
+        })
         .unwrap_or_default()
 }
 
@@ -79,9 +86,9 @@ impl Exec for SystemExec {
             }
             thread::sleep(Duration::from_millis(10));
         };
-        let stdout = String::from_utf8_lossy(&collected(stdout)).into_owned();
+        let stdout = String::from_utf8_lossy(&collected(stdout, deadline)).into_owned();
         if !status.success() {
-            let stderr = String::from_utf8_lossy(&collected(stderr)).into_owned();
+            let stderr = String::from_utf8_lossy(&collected(stderr, deadline)).into_owned();
             let detail = [stderr.trim(), stdout.trim()]
                 .into_iter()
                 .find(|text| !text.is_empty())

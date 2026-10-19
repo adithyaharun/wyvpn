@@ -133,7 +133,8 @@ pub fn recover_routes(
         }
     };
     for route in saved.routes.iter().rev() {
-        let kernel_owned = platform == Platform::MacOs && matches!(route.via, Via::Interface(_));
+        let kernel_owned = platform == Platform::MacOs
+            && matches!(&route.via, Via::Interface(dev) if *dev == saved.interface);
         if kernel_owned {
             continue;
         }
@@ -293,6 +294,26 @@ mod tests {
         let mut net = FakeNet::default();
         recover_with(&store, &mut net, Platform::MacOs);
         assert_eq!(net.log(), ["del 203.0.113.9/32 via 192.168.1.1 dev en0"]);
+    }
+
+    #[test]
+    fn macos_recovery_still_removes_an_on_link_bypass_on_another_interface() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        let routes = [
+            RouteEntry {
+                network: cidr("203.0.113.9/32"),
+                via: Via::Interface("en0".into()),
+            },
+            RouteEntry {
+                network: cidr("0.0.0.0/1"),
+                via: Via::Interface("utun4".into()),
+            },
+        ];
+        store.save("utun4", &routes).unwrap();
+        let mut net = FakeNet::default();
+        recover_with(&store, &mut net, Platform::MacOs);
+        assert_eq!(net.log(), ["del 203.0.113.9/32 dev en0"]);
     }
 
     #[test]

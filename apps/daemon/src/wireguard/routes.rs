@@ -179,7 +179,7 @@ pub fn tunnel_entries(networks: &[Cidr], dev: &str) -> Vec<RouteEntry> {
 
 pub fn already_present(err: &std::io::Error) -> bool {
     let text = err.to_string();
-    text.contains("File exists") || text.contains("already exists")
+    text.contains("File exists") || text.contains("already exists") || text.contains("5010")
 }
 
 pub fn ipv6_unavailable(err: &std::io::Error) -> bool {
@@ -187,8 +187,8 @@ pub fn ipv6_unavailable(err: &std::io::Error) -> bool {
     [
         "address family not supported",
         "operation not supported",
+        "requested operation is not supported",
         "ipv6 is disabled",
-        "ipv6 is not",
     ]
     .iter()
     .any(|marker| text.contains(marker))

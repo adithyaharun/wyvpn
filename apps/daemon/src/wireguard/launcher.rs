@@ -27,6 +27,8 @@ use crate::openvpn::management::TunnelEvent;
 
 const STATS_INTERVAL: Duration = Duration::from_secs(2);
 const EVENT_BUFFER: usize = 64;
+const REGISTRATION_BACKSTOP: Duration = Duration::from_secs(2);
+const GATE_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct WireGuardRequest {
     pub profile: Profile,
@@ -100,16 +102,20 @@ impl WireGuardLauncher {
             .await
             .context("the availability check was interrupted")??;
 
-        let registered =
-            tokio::time::timeout(register::TOTAL_DEADLINE, self.server.register(&request))
-                .await
-                .map_err(|_| RegisterError::Timeout)??;
+        let registered = tokio::time::timeout(
+            register::TOTAL_DEADLINE + REGISTRATION_BACKSTOP,
+            self.server.register(&request),
+        )
+        .await
+        .map_err(|_| RegisterError::Timeout)??;
         drop(request);
         let Registered { session, pinger } = registered;
 
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut cancel_on_drop = CancelOnDrop(Some(Arc::clone(&cancelled)));
-        let gate = Arc::clone(&self.bring_up_gate).lock_owned().await;
+        let gate = tokio::time::timeout(GATE_TIMEOUT, Arc::clone(&self.bring_up_gate).lock_owned())
+            .await
+            .map_err(|_| anyhow::anyhow!("the previous tunnel is still shutting down"))?;
         let parts = (self.parts)()?;
         let for_bring_up = Arc::clone(&session);
         let tunnel = tokio::task::spawn_blocking(move || {
@@ -117,6 +123,10 @@ impl WireGuardLauncher {
                 bail!("the connection was cancelled");
             }
             let mut tunnel = Tunnel::bring_up(parts, &for_bring_up.config, &for_bring_up.keys)?;
+            if cancelled.load(Ordering::SeqCst) {
+                let _ = tunnel.tear_down();
+                bail!("the connection was cancelled");
+            }
             tunnel.keep(gate);
             Ok(tunnel)
         })
@@ -480,6 +490,7 @@ pub mod testing {
         pub fail_up: Arc<Mutex<Option<String>>>,
         pub register_delay: Arc<Mutex<Duration>>,
         pub block_up: Arc<Mutex<Option<BlockUp>>>,
+        pub downs_at_start: Arc<Mutex<Vec<usize>>>,
         pub config: WireGuardConfig,
         data: Arc<tempfile::TempDir>,
     }
@@ -573,9 +584,17 @@ pub mod testing {
                 fail_up: Arc::default(),
                 register_delay: Arc::default(),
                 block_up: Arc::default(),
+                downs_at_start: Arc::default(),
                 config,
                 data: Arc::new(tempfile::tempdir().unwrap()),
             }
+        }
+
+        pub fn downs_at_start(&self) -> Vec<usize> {
+            self.downs_at_start
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
         }
 
         pub fn backend(&self, index: usize) -> Handle {
@@ -618,6 +637,7 @@ pub mod testing {
             let data = Arc::clone(&self.data);
             let fail_up = Arc::clone(&self.fail_up);
             let block_up = Arc::clone(&self.block_up);
+            let downs_at_start = Arc::clone(&self.downs_at_start);
             WireGuardLauncher {
                 preflight: Arc::new(move || {
                     if unavailable.load(Ordering::SeqCst) {
@@ -642,10 +662,13 @@ pub mod testing {
                             .unwrap_or_else(PoisonError::into_inner)
                             .clone();
                     });
-                    backends
+                    let mut all = backends.lock().unwrap_or_else(PoisonError::into_inner);
+                    downs_at_start
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .push(handle);
+                        .push(all.last().map_or(1, |previous| previous.with(|r| r.downs)));
+                    all.push(handle);
+                    drop(all);
                     let blocked = block_up
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -977,7 +1000,10 @@ mod tests {
             err.downcast_ref::<RegisterError>(),
             Some(RegisterError::Timeout)
         ));
-        assert_eq!(started.elapsed(), register::TOTAL_DEADLINE);
+        assert_eq!(
+            started.elapsed(),
+            register::TOTAL_DEADLINE + REGISTRATION_BACKSTOP
+        );
         assert_eq!(fakes.backend_count(), 0);
     }
 
@@ -1029,8 +1055,67 @@ mod tests {
         let Launched { running, .. } = second.await.unwrap().unwrap();
         fakes.backend(0).with(|record| assert_eq!(record.downs, 1));
         assert_eq!(fakes.backend_count(), 2);
+        assert_eq!(fakes.downs_at_start(), [1, 1]);
         assert!(fakes.state_record().exists());
         running.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_install_failure_after_bring_up_is_cleaned_up_before_launch_returns() {
+        let mut fakes = Fakes::new();
+        fakes.config.routes = vec![crate::wireguard::testutil::route("0.0.0.0/0")];
+        fakes.net.lock().fail_add = vec!["128.0.0.0/1".into()];
+        let err = fakes
+            .launcher()
+            .launch_request(request())
+            .await
+            .err()
+            .unwrap();
+        assert!(format!("{err:#}").contains("128.0.0.0/1"));
+        fakes.backend(0).with(|record| {
+            assert_eq!(record.downs, 1);
+            assert!(!record.is_up);
+        });
+        let log = fakes.net.log();
+        assert!(log.contains(&"del 0.0.0.0/1 dev fake0".to_owned()));
+        assert!(log.contains(&"del 203.0.113.9/32 via 192.168.1.1 dev en0".to_owned()));
+        assert!(!fakes.state_record().exists());
+        assert_eq!(fakes.downs_at_start(), [1]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_launch_queued_behind_a_stuck_teardown_gives_up_with_a_clear_error() {
+        let fakes = Fakes::new();
+        let launcher = fakes.launcher();
+        let held = Arc::clone(&launcher.bring_up_gate).lock_owned().await;
+        let started = tokio::time::Instant::now();
+        let err = launcher.launch_request(request()).await.err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            "the previous tunnel is still shutting down"
+        );
+        assert_eq!(started.elapsed(), GATE_TIMEOUT);
+        assert_eq!(fakes.backend_count(), 0);
+        drop(held);
+        assert!(launcher.launch_request(request()).await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn aborting_a_queued_bring_up_never_creates_a_backend() {
+        let fakes = Fakes::new();
+        let launcher = Arc::new(fakes.launcher());
+        let held = Arc::clone(&launcher.bring_up_gate).lock_owned().await;
+        let queued = tokio::spawn({
+            let launcher = Arc::clone(&launcher);
+            async move { launcher.launch_request(request()).await.map(drop) }
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        queued.abort();
+        let _ = queued.await;
+        drop(held);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(fakes.backend_count(), 0);
+        assert!(fakes.net.log().is_empty());
     }
 
     #[tokio::test(start_paused = true)]

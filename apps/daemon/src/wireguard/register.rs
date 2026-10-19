@@ -6,8 +6,7 @@ use thiserror::Error;
 use wyvpn_core::http::ApiClient;
 use wyvpn_core::tls::{Pins, TlsPolicy};
 use wyvpn_core::wireguard::{
-    self, BestError, DeviceInfo, REGISTER_TIMEOUT, RegistrationInput, WireGuardSession,
-    registration_hosts,
+    self, BestError, DeviceInfo, RegistrationInput, WireGuardSession, registration_hosts,
 };
 use wyvpn_core::{Error as CoreError, Profile};
 use wyvpn_ipc::{ErrorBody, ErrorCode, sanitize_text};
@@ -18,6 +17,7 @@ const STATUS_KEY_REUSED: u16 = 413;
 const STATUS_SERVER_OFFLINE: u16 = 429;
 const MAX_TEXT_CHARS: usize = 256;
 pub const TOTAL_DEADLINE: Duration = Duration::from_secs(30);
+const PER_ATTEMPT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Error)]
 pub enum RegisterError {
@@ -94,7 +94,7 @@ pub struct Timeouts {
 impl Default for Timeouts {
     fn default() -> Self {
         Self {
-            request: REGISTER_TIMEOUT,
+            request: PER_ATTEMPT,
             total: TOTAL_DEADLINE,
         }
     }
@@ -128,8 +128,14 @@ pub async fn register_hosts(
     let mut best = BestError::default();
     let mut session = None;
     for host in hosts {
-        let attempt =
-            wireguard::register_at_with_timeout(client, host, profile, &input, timeouts.request);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let attempt = wireguard::register_at_with_timeout(
+            client,
+            host,
+            profile,
+            &input,
+            timeouts.request.min(remaining),
+        );
         match tokio::time::timeout_at(deadline, attempt).await {
             Ok(Ok(found)) => {
                 session = Some(found);

@@ -80,6 +80,9 @@ pub async fn run(
             if !*handshake.borrow() {
                 // a failing round before the handshake is the handshake wait's to report
                 if handshake.wait_for(|up| *up).await.is_err() {
+                    let _ = events
+                        .send(TunnelEvent::Fatal("tunnel monitor stopped".to_owned()))
+                        .await;
                     return;
                 }
                 continue;
@@ -309,7 +312,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_loop_ends_quietly_when_the_handshake_never_comes() {
+    async fn the_loop_reports_a_monitor_that_stopped_before_the_handshake() {
         let pinger = Script::new(&[]);
         let (events, mut receiver) = mpsc::channel(4);
         let (up, handshake) = watch::channel(false);
@@ -324,6 +327,10 @@ mod tests {
         sleep(Duration::from_secs(20)).await;
         drop(up);
         task.await.unwrap();
+        assert!(matches!(
+            receiver.recv().await,
+            Some(TunnelEvent::Fatal(reason)) if reason == "tunnel monitor stopped"
+        ));
         assert!(receiver.recv().await.is_none());
     }
 }

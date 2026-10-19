@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::{Context, anyhow};
-use wyvpn_core::wireguard::{Endpoint, Host, WireGuardConfig, WireGuardKeys};
+use wyvpn_core::wireguard::{Cidr, Endpoint, Host, WireGuardConfig, WireGuardKeys};
 
 use super::backend::{BackendConfig, SharedBackend, WgBackend, resolve_endpoint};
 use super::dnsctl::{DnsControl, tunnel_dns};
@@ -16,6 +16,10 @@ use super::routes::{
 };
 use super::state::{StateStore, recover_routes};
 use super::userspace::UserspaceBackend;
+
+const IPV6_PROBE: std::net::IpAddr = std::net::IpAddr::V6(std::net::Ipv6Addr::new(
+    0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888,
+));
 
 pub type Resolver = Box<dyn Fn(&Endpoint) -> io::Result<SocketAddr> + Send>;
 
@@ -83,6 +87,7 @@ impl Tunnel {
         } = parts;
 
         let endpoint = resolve(&config.endpoint()).context("cannot resolve the server address")?;
+        recover_routes(&store, routes.as_mut(), Platform::current());
         let mut allowed = allowed_ips(&config.routes, &config.routes6);
         for (network, reason) in &allowed.skipped {
             tracing::warn!(%network, %reason, "skipping a route from the server");
@@ -98,8 +103,6 @@ impl Tunnel {
         } else {
             None
         };
-
-        recover_routes(&store, routes.as_mut(), Platform::current());
 
         let backend_config = BackendConfig {
             address: config.address,
@@ -132,13 +135,36 @@ impl Tunnel {
                 held: Vec::new(),
             }),
         };
-        let live = tunnel.live_mut();
-        if let Some(entry) = bypass {
-            live.install(entry, true)?;
+        if let Err(err) = tunnel.install_all(bypass, &tunnel_networks, config) {
+            if let Err(cleanup) = tunnel.tear_down() {
+                tracing::warn!(error = %format!("{cleanup:#}"), "cleanup after a failed bring-up was incomplete");
+            }
+            return Err(err);
         }
-        for entry in tunnel_entries(&tunnel_networks, &live.interface.clone()) {
-            live.install(entry, false)?;
+        Ok(tunnel)
+    }
+
+    fn install_all(
+        &mut self,
+        bypass: Option<RouteEntry>,
+        tunnel_networks: &[Cidr],
+        config: &WireGuardConfig,
+    ) -> anyhow::Result<()> {
+        let live = self.live_mut();
+        let mut planned: Vec<(RouteEntry, bool)> = bypass.into_iter().map(|e| (e, true)).collect();
+        planned.extend(
+            tunnel_entries(tunnel_networks, &live.interface)
+                .into_iter()
+                .map(|e| (e, false)),
+        );
+        let plan: Vec<RouteEntry> = planned.iter().map(|(entry, _)| entry.clone()).collect();
+        live.store
+            .save(&live.interface, &plan)
+            .context("cannot record the tunnel state")?;
+        for (entry, is_bypass) in planned {
+            live.install(entry, is_bypass)?;
         }
+        live.persist()?;
 
         let dns_config = tunnel_dns(config);
         if !dns_config.is_empty() {
@@ -147,7 +173,7 @@ impl Tunnel {
                 tracing::warn!(%err, "cannot apply dns");
             }
         }
-        Ok(tunnel)
+        Ok(())
     }
 
     fn live_mut(&mut self) -> &mut Live {
@@ -183,24 +209,29 @@ impl Tunnel {
 }
 
 impl Live {
-    fn persist(&self, pending: Option<&RouteEntry>) -> anyhow::Result<()> {
-        let mut entries = self.installed.clone();
-        entries.extend(pending.cloned());
+    fn persist(&self) -> anyhow::Result<()> {
         self.store
-            .save(&self.interface, &entries)
+            .save(&self.interface, &self.installed)
             .context("cannot record the tunnel state")
+    }
+
+    fn no_ipv6_path(&mut self) -> bool {
+        self.routes.route_to(IPV6_PROBE).is_err()
     }
 
     fn install(&mut self, entry: RouteEntry, bypass: bool) -> anyhow::Result<()> {
         let critical = bypass || is_critical(entry.network);
-        self.persist(Some(&entry))?;
         match self.routes.add_route(&entry) {
             Ok(()) => self.installed.push(entry),
             Err(err) if bypass && already_present(&err) => {
                 tracing::debug!(network = %entry.network, "route to the server already present");
-                self.persist(None)?;
             }
-            Err(err) if critical && !(entry.network.addr.is_ipv6() && ipv6_unavailable(&err)) => {
+            Err(err)
+                if critical
+                    && !(entry.network.addr.is_ipv6()
+                        && ipv6_unavailable(&err)
+                        && self.no_ipv6_path()) =>
+            {
                 return Err(anyhow::Error::new(err)
                     .context(format!("cannot install the route {}", entry.network)));
             }
@@ -210,7 +241,6 @@ impl Live {
                 } else {
                     tracing::warn!(%err, network = %entry.network, "cannot install a route");
                 }
-                self.persist(None)?;
             }
         }
         Ok(())
@@ -259,7 +289,7 @@ impl Drop for Tunnel {
             }
         };
         if tokio::runtime::Handle::try_current().is_ok() {
-            std::thread::spawn(run);
+            super::background::spawn(run);
         } else {
             run();
         }
@@ -598,21 +628,24 @@ mod tests {
     }
 
     #[test]
-    fn ipv6_routes_are_optional_when_the_host_has_no_ipv6() {
-        let rig = Rig::new();
-        rig.net.lock().fail_add_with = vec![
+    fn ipv6_routes_are_optional_only_when_the_host_has_no_ipv6_path() {
+        let failures = vec![
             (
-                "::/1".into(),
-                "RTNETLINK answers: Address family not supported by protocol".into(),
+                "::/1".to_owned(),
+                "RTNETLINK answers: Address family not supported by protocol".to_owned(),
             ),
             (
-                "8000::/1".into(),
-                "RTNETLINK answers: Operation not supported".into(),
+                "8000::/1".to_owned(),
+                "RTNETLINK answers: Operation not supported".to_owned(),
             ),
         ];
         let mut cfg = config();
         cfg.routes = vec![route("10.0.0.0/8")];
         cfg.routes6 = vec![route("::/0")];
+
+        let rig = Rig::new();
+        rig.net.lock().no_v6 = true;
+        rig.net.lock().fail_add_with = failures.clone();
         let (tunnel, _) = up(&rig, &cfg);
         let mut tunnel = tunnel.unwrap();
         tunnel.tear_down().unwrap();
@@ -624,6 +657,12 @@ mod tests {
         );
 
         let rig = Rig::new();
+        rig.net.lock().fail_add_with = failures;
+        let (tunnel, _) = up(&rig, &cfg);
+        assert!(tunnel.is_err());
+
+        let rig = Rig::new();
+        rig.net.lock().no_v6 = true;
         rig.net.lock().fail_add_with = vec![("::/1".into(), "permission denied".into())];
         let (tunnel, _) = up(&rig, &cfg);
         assert!(tunnel.is_err());

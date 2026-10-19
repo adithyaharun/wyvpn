@@ -17,6 +17,7 @@ use super::backend::{BackendConfig, Interface, PeerStats, WgBackend, resolve_end
 use super::netops::{LinkConfig, LinkOps};
 
 const HANDSHAKE_KICK: Duration = Duration::from_millis(250);
+const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Running {
     device: Device<DefaultDeviceTransports>,
@@ -131,6 +132,13 @@ async fn read_stats<T: DeviceTransports>(device: &Device<T>, key: &PublicKey) ->
         .await
 }
 
+fn stop_device(runtime: &Handle, running: Running) {
+    let stopped = runtime.block_on(tokio::time::timeout(STOP_TIMEOUT, running.device.stop()));
+    if stopped.is_err() {
+        tracing::warn!("the WireGuard device did not stop in time");
+    }
+}
+
 impl WgBackend for UserspaceBackend {
     fn up(&mut self, config: &BackendConfig, keys: &WireGuardKeys) -> anyhow::Result<Interface> {
         if self.running.is_some() {
@@ -178,7 +186,7 @@ impl WgBackend for UserspaceBackend {
 
     fn down(&mut self) -> anyhow::Result<()> {
         if let Some(running) = self.running.take() {
-            self.runtime.block_on(running.device.stop());
+            stop_device(&self.runtime, running);
         }
         Ok(())
     }
@@ -190,9 +198,9 @@ impl Drop for UserspaceBackend {
             return;
         };
         let runtime = self.runtime.clone();
-        let stop = move || runtime.block_on(running.device.stop());
+        let stop = move || stop_device(&runtime, running);
         if Handle::try_current().is_ok() {
-            std::thread::spawn(stop);
+            super::background::spawn(stop);
         } else {
             stop();
         }

@@ -374,6 +374,9 @@ pub fn route_command(
             ];
             if let Via::Gateway { gateway, .. } = &entry.via {
                 args.push(s("via"));
+                if gateway.is_ipv6() != v6 {
+                    args.push(s("inet6"));
+                }
                 args.push(gateway.to_string());
             }
             args.push(s("dev"));
@@ -691,6 +694,7 @@ pub mod fake {
         pub fail_delete: bool,
         pub fail_link: bool,
         pub exists_on_add: Vec<String>,
+        pub no_v6: bool,
     }
 
     #[derive(Clone, Default)]
@@ -742,6 +746,9 @@ pub mod fake {
         fn route_to(&mut self, dest: IpAddr) -> io::Result<Via> {
             let mut inner = self.lock();
             inner.log.push(format!("route_to {dest}"));
+            if inner.no_v6 && dest.is_ipv6() {
+                return Err(io::Error::other("network is unreachable"));
+            }
             inner
                 .via
                 .clone()
@@ -935,6 +942,24 @@ mod tests {
         assert!(line(Platform::Windows, RouteOp::Delete, &v6).ends_with(
             "interface ipv6 delete route prefix=8000::/1 interface=utun4 nexthop=:: store=active"
         ));
+    }
+
+    #[test]
+    fn linux_routes_name_the_gateway_family_when_it_differs() {
+        let entry = RouteEntry {
+            network: cidr("203.0.113.9/32"),
+            via: Via::Gateway {
+                gateway: "fe80::1".parse().unwrap(),
+                dev: "eth0".into(),
+            },
+        };
+        for (op, verb) in [(RouteOp::Add, "add"), (RouteOp::Delete, "del")] {
+            let command = route_command(Platform::Linux, &programs(), op, &entry);
+            assert_eq!(
+                command.args.join(" "),
+                format!("-4 route {verb} 203.0.113.9/32 via inet6 fe80::1 dev eth0")
+            );
+        }
     }
 
     #[test]

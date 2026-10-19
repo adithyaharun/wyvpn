@@ -284,6 +284,10 @@ impl Manager {
         if let Some(handle) = handle {
             let _ = handle.await;
         }
+        let _ = tokio::task::spawn_blocking(|| {
+            crate::wireguard::background::join_all(Duration::from_secs(5))
+        })
+        .await;
     }
 }
 

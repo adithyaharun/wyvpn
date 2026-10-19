@@ -416,6 +416,13 @@ async fn the_total_deadline_bounds_the_whole_host_walk() {
 }
 
 #[test]
+fn one_hung_host_cannot_use_the_whole_default_budget() {
+    let timeouts = Timeouts::default();
+    assert_eq!(timeouts.request, Duration::from_secs(10));
+    assert_eq!(timeouts.total, Duration::from_secs(30));
+}
+
+#[test]
 fn server_text_is_sanitized_and_capped_in_error_bodies() {
     let err = RegisterError::from(CoreError::InvalidResponse(
         "bad\u{1b}[2J\u{202e}text".into(),

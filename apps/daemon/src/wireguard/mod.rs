@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod background;
 pub mod dnsctl;
 pub mod exec;
 pub mod handshake;

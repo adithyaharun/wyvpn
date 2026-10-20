@@ -179,7 +179,9 @@ pub fn tunnel_entries(networks: &[Cidr], dev: &str) -> Vec<RouteEntry> {
 
 pub fn already_present(err: &std::io::Error) -> bool {
     let text = err.to_string();
-    text.contains("File exists") || text.contains("already exists") || text.contains("5010")
+    text.contains("File exists")
+        || text.contains("already exists")
+        || text.to_ascii_lowercase().contains("error 5010")
 }
 
 pub fn ipv6_unavailable(err: &std::io::Error) -> bool {
@@ -323,6 +325,9 @@ mod tests {
     fn error_markers_are_exact() {
         assert!(already_present(&std::io::Error::other(
             "netsh exited with 1: Error 5010"
+        )));
+        assert!(!already_present(&std::io::Error::other(
+            "route to 2001:db8:5010::/48 failed"
         )));
         assert!(ipv6_unavailable(&std::io::Error::other(
             "The requested operation is not supported."

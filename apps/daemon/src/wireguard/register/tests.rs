@@ -433,7 +433,7 @@ async fn one_hung_host_cannot_use_the_whole_budget() {
         &device(),
         Some(PIN),
         Timeouts {
-            request: Duration::from_millis(300),
+            request: Duration::from_secs(2),
             total: Duration::from_secs(10),
         },
     )

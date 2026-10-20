@@ -17,7 +17,7 @@ pub struct SystemExec {
 }
 
 impl SystemExec {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub const fn with_timeout(timeout: Duration) -> Self {
         Self { timeout }
     }

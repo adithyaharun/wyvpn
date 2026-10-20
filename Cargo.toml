@@ -7,7 +7,7 @@ default-members = ["apps/cli", "apps/daemon", "packages/*"]
 version = "0.1.2"
 edition = "2024"
 license = "MIT"
-rust-version = "1.85"
+rust-version = "1.95"
 repository = "https://github.com/adithyaharun/wyvpn"
 
 [workspace.dependencies]
@@ -15,6 +15,8 @@ wyvpn-core = { path = "packages/core" }
 wyvpn-ipc = { path = "packages/ipc" }
 
 anyhow = "1"
+gotatun = { version = "=0.10.1", default-features = false, features = ["ring", "device", "tun"] }
+ipnetwork = "0.21"
 nix = { version = "0.31", default-features = false, features = ["user", "fs", "hostname"] }
 rpassword = "7"
 rmcp = { version = "3.5", features = ["server", "macros", "transport-io"] }
@@ -41,7 +43,7 @@ url = "2"
 rustls-platform-verifier = "0.7"
 wiremock = "0.6"
 zeroize = { version = "1", features = ["derive"] }
-windows-sys = { version = "0.61", features = ["Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Security_Cryptography_Catalog", "Win32_Security_Cryptography_Sip", "Win32_Security_WinTrust", "Win32_Foundation"] }
+windows-sys = { version = "0.61", features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Security_Cryptography_Catalog", "Win32_Security_Cryptography_Sip", "Win32_Security_WinTrust", "Win32_Foundation", "Win32_System_SystemInformation"] }
 windows-service = "0.8"
 security-framework-sys = "2"
 core-foundation-sys = "0.8"

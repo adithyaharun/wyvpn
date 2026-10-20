@@ -13,6 +13,10 @@ pub(crate) fn random_bytes<const N: usize>() -> [u8; N] {
     out
 }
 
+pub fn below(max_exclusive: u32) -> u32 {
+    u32::from_le_bytes(random_bytes::<4>()) % max_exclusive.max(1)
+}
+
 pub fn alphanumeric(len: usize) -> String {
     let mut out = String::with_capacity(len);
     let mut buf = [0u8; 64];
@@ -31,6 +35,13 @@ pub fn alphanumeric(len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn below_stays_in_range() {
+        assert!((0..200).all(|_| below(3) < 3));
+        assert_eq!(below(0), 0);
+        assert_eq!(below(1), 0);
+    }
 
     #[test]
     fn alphanumeric_has_requested_length_and_charset() {

@@ -29,6 +29,12 @@ const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(15);
 const BOX_NONCE_LEN: usize = 24;
 const INNER_NONCE_LEN: usize = 16;
 const MAX_REGISTRATION_HOSTS: usize = 8;
+const MIN_KEEPALIVE_SECS: u64 = 5;
+const MAX_KEEPALIVE_SECS: u64 = 120;
+const MAX_ROUTES: usize = 1024;
+const MIN_MTU: u16 = 576;
+const MIN_MTU_V6: u16 = 1280;
+const MAX_MTU: u16 = 9000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -104,6 +110,28 @@ impl fmt::Debug for KeepaliveInput<'_> {
     }
 }
 
+struct ByteCount(usize);
+
+impl std::io::Write for ByteCount {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn public_key_for(private: &[u8]) -> [u8; 32] {
+    let mut secret = SecretKey::from_slice(private).expect("private key is 32 bytes");
+    let public = *secret.public_key().as_bytes();
+    // SecretKey::drop leaves its raw bytes behind; overwrite them.
+    secret = SecretKey::from_bytes([0; 32]);
+    std::hint::black_box(&mut secret);
+    public
+}
+
 pub struct WireGuardKeys {
     private: Zeroizing<[u8; 32]>,
     public: [u8; 32],
@@ -111,12 +139,17 @@ pub struct WireGuardKeys {
 
 impl WireGuardKeys {
     pub fn generate() -> Self {
-        let mut private = Zeroizing::new(rng::random_bytes::<32>());
+        let mut private = Zeroizing::new([0u8; 32]);
+        rng::fill(&mut *private);
         private[0] &= 248;
         private[31] &= 127;
         private[31] |= 64;
-        let public = *SecretKey::from_bytes(*private).public_key().as_bytes();
+        let public = public_key_for(&private[..]);
         Self { private, public }
+    }
+
+    pub fn private_bytes(&self) -> &[u8; 32] {
+        &self.private
     }
 
     pub fn public_key_base64(&self) -> String {
@@ -345,10 +378,36 @@ struct RawConfig {
     web_port: Option<u16>,
     web_no_ssl: Option<bool>,
     public_key: Option<String>,
-    routes: Option<Vec<Route>>,
-    routes6: Option<Vec<Route>>,
+    routes: Option<Vec<serde_json::Value>>,
+    routes6: Option<Vec<serde_json::Value>>,
     dns_servers: Option<Vec<IpAddr>>,
     search_domains: Option<Vec<String>>,
+}
+
+fn lenient_routes(values: Option<Vec<serde_json::Value>>, v6: bool) -> Vec<Route> {
+    let mut routes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut skipped = 0usize;
+    for value in values.unwrap_or_default() {
+        let Ok(route) = serde_json::from_value::<Route>(value) else {
+            skipped += 1;
+            continue;
+        };
+        let key = (route.network.addr, route.network.prefix, route.net_gateway);
+        if route.network.addr.is_ipv6() != v6 || routes.len() >= MAX_ROUTES || !seen.insert(key) {
+            skipped += 1;
+            continue;
+        }
+        routes.push(route);
+    }
+    if skipped > 0 {
+        tracing::warn!(
+            skipped,
+            v6,
+            "skipped routes from the server that were invalid, duplicated or over the limit"
+        );
+    }
+    routes
 }
 
 fn required<T>(value: Option<T>, name: &str) -> Result<T> {
@@ -393,21 +452,28 @@ impl WireGuardConfig {
             return Err(Error::InvalidResponse("port must be 1-65535".into()));
         }
         let public_key: PeerKey = required(raw.public_key, "public_key")?.parse()?;
-        let routes = raw.routes.unwrap_or_default();
-        let routes6 = raw.routes6.unwrap_or_default();
-        if routes.iter().any(|r| !r.network.addr.is_ipv4())
-            || routes6.iter().any(|r| !r.network.addr.is_ipv6())
-        {
-            return Err(Error::InvalidResponse(
-                "route has the wrong address family".into(),
-            ));
+        let gateway = required(raw.gateway, "gateway")?;
+        if blocked_ip(gateway.into()) {
+            return Err(Error::InvalidResponse("gateway is not usable".into()));
         }
+        if let Some(mtu) = raw.mtu.filter(|mtu| *mtu != 0) {
+            let floor = if address6.is_some() {
+                MIN_MTU_V6
+            } else {
+                MIN_MTU
+            };
+            if !(floor..=MAX_MTU).contains(&mtu) {
+                return Err(Error::InvalidResponse("mtu is out of range".into()));
+            }
+        }
+        let routes = lenient_routes(raw.routes, false);
+        let routes6 = lenient_routes(raw.routes6, true);
         Ok(Self {
             address,
             address6,
             hostname,
             hostname6,
-            gateway: required(raw.gateway, "gateway")?,
+            gateway,
             gateway6: raw.gateway6,
             port,
             mtu: raw.mtu.filter(|m| *m != 0),
@@ -426,8 +492,7 @@ impl WireGuardConfig {
     pub fn keepalive_interval(&self) -> Duration {
         Duration::from_secs(match self.ping_interval {
             0 => 15,
-            1..=4 => 5,
-            other => other,
+            other => other.clamp(MIN_KEEPALIVE_SECS, MAX_KEEPALIVE_SECS),
         })
     }
 
@@ -550,6 +615,13 @@ fn sign_digest(key: &RsaPrivateKey, digest: &[u8]) -> Result<Vec<u8>> {
         .map_err(|_| Error::InvalidKey("profile private key cannot sign"))
 }
 
+fn valid_path_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 fn prepare(
     profile: &Profile,
     method: Method,
@@ -567,6 +639,11 @@ fn prepare(
     ] {
         if value.is_empty() {
             return Err(Error::MissingField(name));
+        }
+        if !valid_path_id(value) {
+            return Err(Error::MalformedHeader(format!(
+                "{name} contains characters outside A-Z, a-z, 0-9, _ and -"
+            )));
         }
     }
     let sync_token = header
@@ -614,7 +691,10 @@ fn prepare(
         public_address6: &device.public_address6,
         sso_token: "",
     };
-    let plaintext = Zeroizing::new(serde_json::to_vec(&inner).map_err(|_| Error::Encrypt)?);
+    let mut counter = ByteCount(0);
+    serde_json::to_writer(&mut counter, &inner).map_err(|_| Error::Encrypt)?;
+    let mut plaintext = Zeroizing::new(Vec::with_capacity(counter.0));
+    serde_json::to_writer(&mut *plaintext, &inner).map_err(|_| Error::Encrypt)?;
 
     let ephemeral = SecretKey::generate(&mut OsRng);
     let box_nonce = rng::random_bytes::<BOX_NONCE_LEN>();
@@ -804,7 +884,7 @@ fn blocked_v4(ip: Ipv4Addr) -> bool {
         || ip.octets()[0] == 0
 }
 
-fn blocked_ip(ip: IpAddr) -> bool {
+pub(crate) fn blocked_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => blocked_v4(ip),
         IpAddr::V6(ip) => {

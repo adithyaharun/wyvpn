@@ -9,12 +9,16 @@ fn port_of(word: u32) -> u16 {
 pub fn owning_pid(table: &[u32], local: SocketAddrV4, remote_port: u16) -> Option<u32> {
     let count = *table.first()? as usize;
     let rows = table.get(1..)?;
-    rows.chunks_exact(ROW_WORDS).take(count).find_map(|row| {
-        let matches = Ipv4Addr::from(row[1].to_ne_bytes()) == *local.ip()
-            && port_of(row[2]) == local.port()
-            && port_of(row[4]) == remote_port;
-        matches.then_some(row[5])
-    })
+    rows.as_chunks::<ROW_WORDS>()
+        .0
+        .iter()
+        .take(count)
+        .find_map(|row| {
+            let matches = Ipv4Addr::from(row[1].to_ne_bytes()) == *local.ip()
+                && port_of(row[2]) == local.port()
+                && port_of(row[4]) == remote_port;
+            matches.then_some(row[5])
+        })
 }
 
 #[cfg(windows)]

@@ -120,7 +120,7 @@ Current releases are not code-signed yet, so their files have `-unsigned` in the
 
 ## Requirements
 
-- Rust 1.85 or later
+- Rust 1.95 or later
 - [Bun](https://bun.sh)
 - OpenVPN (`brew install openvpn` on macOS, your distribution's package on Linux)
 - Tauri 2 [system dependencies](https://tauri.app/start/prerequisites/) for the desktop app

@@ -299,6 +299,12 @@ impl State {
         }
     }
 
+    pub fn record_handshake(&self, id: &str, at: u64) {
+        if let Some(entry) = self.runtime().get_mut(id) {
+            entry.status.last_handshake = Some(at);
+        }
+    }
+
     pub fn record_bytes(&self, id: &str, rx_bytes: u64, tx_bytes: u64) {
         if let Some(entry) = self.runtime().get_mut(id) {
             entry.status.rx_bytes = rx_bytes;

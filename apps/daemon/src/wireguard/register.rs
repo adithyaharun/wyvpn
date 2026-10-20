@@ -6,8 +6,7 @@ use thiserror::Error;
 use wyvpn_core::http::ApiClient;
 use wyvpn_core::tls::{Pins, TlsPolicy};
 use wyvpn_core::wireguard::{
-    self, BestError, DeviceInfo, REGISTER_TIMEOUT, RegistrationInput, WireGuardSession,
-    registration_hosts,
+    self, BestError, DeviceInfo, RegistrationInput, WireGuardSession, registration_hosts,
 };
 use wyvpn_core::{Error as CoreError, Profile};
 use wyvpn_ipc::{ErrorBody, ErrorCode, sanitize_text};
@@ -17,7 +16,8 @@ use crate::control::core_error;
 const STATUS_KEY_REUSED: u16 = 413;
 const STATUS_SERVER_OFFLINE: u16 = 429;
 const MAX_TEXT_CHARS: usize = 256;
-const TOTAL_DEADLINE: Duration = Duration::from_secs(50);
+pub const TOTAL_DEADLINE: Duration = Duration::from_secs(30);
+const PER_ATTEMPT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Error)]
 pub enum RegisterError {
@@ -60,6 +60,13 @@ impl From<CoreError> for RegisterError {
 }
 
 impl RegisterError {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Denied { .. } | Self::InsecureKeepalive | Self::Core(CoreError::Unsupported(_))
+        )
+    }
+
     pub fn to_body(&self) -> ErrorBody {
         let mut body = match self {
             Self::Denied { .. } => ErrorBody::new(ErrorCode::AuthFailed, self.to_string()),
@@ -87,7 +94,7 @@ pub struct Timeouts {
 impl Default for Timeouts {
     fn default() -> Self {
         Self {
-            request: REGISTER_TIMEOUT,
+            request: PER_ATTEMPT,
             total: TOTAL_DEADLINE,
         }
     }

@@ -646,29 +646,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wireguard_connect_prompts_for_pin_then_is_not_implemented() {
-        let harness = Harness::new().await;
+    async fn wireguard_connect_prompts_for_pin_then_runs_a_session() {
+        let (launcher, mut launches) = fake::pair();
+        let harness = Harness::launching(launcher).await;
         let mut client = harness.client().await;
         let id = prompted(&harness, &mut client, Some(Transport::WireGuard)).await;
 
-        let done = error_of(client.call(submit_request(&id, Some("0000"))).await);
-        assert_eq!(done.code, ErrorCode::NotImplemented);
-        assert_eq!(done.message, "tunnel bring-up not implemented");
-        assert!(!format!("{done:?}").contains("0000"));
+        assert_eq!(
+            client.call(submit_request(&id, Some("0000"))).await.outcome,
+            Outcome::Result(Response::Ok)
+        );
+        let process = launches.recv().await.unwrap();
+        assert!(process.credentials.is_none());
+        process.send(TunnelEvent::Handshake(1_760_000_000)).await;
+        process
+            .send(TunnelEvent::Connected {
+                tunnel_ip: Some("10.200.0.5".into()),
+                remote: Some("203.0.113.9:51820".into()),
+            })
+            .await;
         assert!(matches!(
             client.event().await,
             Event::StateChanged {
-                state: ConnectionState::Disconnected,
+                state: ConnectionState::Connected,
+                error: None,
                 ..
             }
         ));
-        assert_eq!(
-            harness.state.connection_state(&id),
-            ConnectionState::Disconnected
-        );
+        let Outcome::Result(Response::Status { statuses }) =
+            client.call(Request::Status).await.outcome
+        else {
+            panic!();
+        };
+        assert_eq!(statuses[0].transport, Some(Transport::WireGuard));
+        assert_eq!(statuses[0].tunnel_ip.as_deref(), Some("10.200.0.5"));
+        assert_eq!(statuses[0].last_handshake, Some(1_760_000_000));
 
-        let again = error_of(client.call(submit_request(&id, Some("0000"))).await);
-        assert_eq!(again.code, ErrorCode::InvalidState);
+        let request = Request::Disconnect { profile_id: id };
+        assert_eq!(
+            client.call(request).await.outcome,
+            Outcome::Result(Response::Ok)
+        );
+        assert!(matches!(
+            client.event().await,
+            Event::StateChanged {
+                state: ConnectionState::Disconnecting,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

@@ -17,7 +17,6 @@ mod state;
 mod storage;
 #[cfg(test)]
 mod testdata;
-#[expect(dead_code, reason = "backend not yet called by the session loop")]
 mod wireguard;
 
 use std::future::Future;
@@ -176,6 +175,7 @@ async fn serve_daemon<F: Future<Output = ()>>(
     tracing::info!(dir = %data_dir.display(), "profile storage ready");
     #[cfg(unix)]
     dns::recover(&data_dir);
+    wireguard::state::recover(&data_dir);
     openvpn::runtime::sweep(&data_dir);
     report_openvpn(args.openvpn_path.clone(), data_dir.clone()).await;
     let launcher = launcher::TunnelLauncher::new(

@@ -415,6 +415,35 @@ async fn the_total_deadline_bounds_the_whole_host_walk() {
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
+#[tokio::test]
+async fn one_hung_host_cannot_use_the_whole_budget() {
+    let hung = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_secs(3600)))
+        .mount(&hung)
+        .await;
+    let live = Rig::start(Reply::Accept { web_no_ssl: false }).await;
+    let hosts = vec![hung.uri(), live.server.uri()];
+    let profile = live.profile(&hosts, &[]);
+    let started = std::time::Instant::now();
+    let session = register_hosts(
+        &client(),
+        &hosts,
+        &profile,
+        &device(),
+        Some(PIN),
+        Timeouts {
+            request: Duration::from_secs(2),
+            total: Duration::from_secs(10),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(live.requests().await, 1);
+    assert_eq!(live.seen_keys(), [session.keys.public_key_base64()]);
+}
+
 #[test]
 fn server_text_is_sanitized_and_capped_in_error_bodies() {
     let err = RegisterError::from(CoreError::InvalidResponse(

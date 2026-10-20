@@ -67,14 +67,12 @@ pub async fn replaced(
     let mut changed = false;
     loop {
         tokio::time::sleep(interval).await;
-        if !changed {
-            if let Some(confirmed) = tracker.observe(Identity::read(&path)) {
-                if let Check::Fail(reason) = verify(&path) {
-                    tracing::warn!(%reason, "replaced wyvpnd executable failed verification; keeping the running daemon");
-                    tracker = Tracker::new(confirmed);
-                } else {
-                    changed = true;
-                }
+        if !changed && let Some(confirmed) = tracker.observe(Identity::read(&path)) {
+            if let Check::Fail(reason) = verify(&path) {
+                tracing::warn!(%reason, "replaced wyvpnd executable failed verification; keeping the running daemon");
+                tracker = Tracker::new(confirmed);
+            } else {
+                changed = true;
             }
         }
         if changed && restartable() {

@@ -41,10 +41,10 @@ impl Runner for FakeRunner {
             args: args.iter().map(|a| (*a).to_owned()).collect(),
             stdin: stdin.map(str::to_owned),
         });
-        if let Some(bad) = self.failing.borrow().as_deref() {
-            if args.contains(&bad) {
-                return Err(io::Error::other("injected failure"));
-            }
+        if let Some(bad) = self.failing.borrow().as_deref()
+            && args.contains(&bad)
+        {
+            return Err(io::Error::other("injected failure"));
         }
         let key = stdin.map(str::trim).unwrap_or_default();
         Ok(self

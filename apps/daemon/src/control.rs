@@ -8,7 +8,6 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use wyvpn_core::auth::password_for;
 use wyvpn_core::tls::Pins;
-use wyvpn_core::wireguard::{DeviceInfo, PendingRegistration, Platform, RegistrationInput};
 use wyvpn_core::{Error, NamedProfile, Profile, import, read_profiles};
 use wyvpn_ipc::{
     AuthMode, ErrorBody, ErrorCode, Event, ImportSource, LogSource, MAX_IMPORT_BYTES, Outcome,
@@ -21,7 +20,6 @@ use crate::session::launch_request;
 use crate::state::{State, StoredProfile};
 use crate::storage::valid_id;
 
-const NOT_IMPLEMENTED: &str = "tunnel bring-up not implemented";
 const MAX_NAME_CHARS: usize = 64;
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -284,24 +282,9 @@ fn start_tunnel(
     pin: Option<Zeroizing<String>>,
 ) -> Reply {
     let profile_id = stored.id.clone();
-    let started = match transport {
-        Transport::OpenVpn => launch_request(&stored.profile, pin.as_ref().map(|pin| pin.as_str()))
-            .map(drop)
-            .and_then(|()| state.sessions.start(state, stored, pin)),
-        Transport::WireGuard => {
-            let device = device_info();
-            PendingRegistration::start(
-                &stored.profile,
-                &RegistrationInput {
-                    device: &device,
-                    pin: pin.as_ref().map(|pin| pin.as_str()),
-                    auth_token: None,
-                },
-            )
-            .map_err(|err| core_error(&err))
-            .and_then(|_| Err(ErrorBody::new(ErrorCode::NotImplemented, NOT_IMPLEMENTED)))
-        }
-    };
+    let started = launch_request(&stored, transport, pin.as_ref().map(|pin| pin.as_str()))
+        .map(drop)
+        .and_then(|()| state.sessions.start(state, stored, pin));
     match started {
         Ok(()) => Ok(Response::Ok),
         Err(err) => {
@@ -309,30 +292,6 @@ fn start_tunnel(
             Err(err)
         }
     }
-}
-
-fn device_info() -> DeviceInfo {
-    DeviceInfo {
-        hostname: hostname(),
-        platform: Platform::current(),
-        client_version: wyvpn_ipc::VERSION.to_owned(),
-        mac_addr: String::new(),
-        mac_addrs: Vec::new(),
-        public_address: String::new(),
-        public_address6: String::new(),
-    }
-}
-
-#[cfg(unix)]
-fn hostname() -> String {
-    nix::unistd::gethostname()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
-#[cfg(windows)]
-fn hostname() -> String {
-    std::env::var("COMPUTERNAME").unwrap_or_default()
 }
 
 fn disconnect(state: &State, profile_id: &str) -> Reply {

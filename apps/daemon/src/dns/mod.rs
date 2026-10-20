@@ -1,7 +1,7 @@
 #[cfg(unix)]
 mod report;
 #[cfg(unix)]
-pub use report::{HookPhase, parse_foreign_options, phase_of};
+pub use report::{DnsSettings, HookPhase, clean_name, parse_foreign_options, phase_of};
 
 #[cfg(unix)]
 mod linux;

@@ -124,7 +124,9 @@ impl WireGuardLauncher {
             }
             let mut tunnel = Tunnel::bring_up(parts, &for_bring_up.config, &for_bring_up.keys)?;
             if cancelled.load(Ordering::SeqCst) {
-                let _ = tunnel.tear_down();
+                if let Err(err) = tunnel.tear_down() {
+                    tracing::warn!(error = %format!("{err:#}"), "cleanup of a cancelled bring-up was incomplete");
+                }
                 bail!("the connection was cancelled");
             }
             tunnel.keep(gate);
@@ -490,7 +492,7 @@ pub mod testing {
         pub fail_up: Arc<Mutex<Option<String>>>,
         pub register_delay: Arc<Mutex<Duration>>,
         pub block_up: Arc<Mutex<Option<BlockUp>>>,
-        pub downs_at_start: Arc<Mutex<Vec<usize>>>,
+        pub downs_at_start: Arc<Mutex<Vec<Option<usize>>>>,
         pub config: WireGuardConfig,
         data: Arc<tempfile::TempDir>,
     }
@@ -590,7 +592,7 @@ pub mod testing {
             }
         }
 
-        pub fn downs_at_start(&self) -> Vec<usize> {
+        pub fn downs_at_start(&self) -> Vec<Option<usize>> {
             self.downs_at_start
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -666,7 +668,7 @@ pub mod testing {
                     downs_at_start
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .push(all.last().map_or(1, |previous| previous.with(|r| r.downs)));
+                        .push(all.last().map(|previous| previous.with(|r| r.downs)));
                     all.push(handle);
                     drop(all);
                     let blocked = block_up
@@ -1055,7 +1057,7 @@ mod tests {
         let Launched { running, .. } = second.await.unwrap().unwrap();
         fakes.backend(0).with(|record| assert_eq!(record.downs, 1));
         assert_eq!(fakes.backend_count(), 2);
-        assert_eq!(fakes.downs_at_start(), [1, 1]);
+        assert_eq!(fakes.downs_at_start(), [None, Some(1)]);
         assert!(fakes.state_record().exists());
         running.stop().await;
     }
@@ -1080,7 +1082,7 @@ mod tests {
         assert!(log.contains(&"del 0.0.0.0/1 dev fake0".to_owned()));
         assert!(log.contains(&"del 203.0.113.9/32 via 192.168.1.1 dev en0".to_owned()));
         assert!(!fakes.state_record().exists());
-        assert_eq!(fakes.downs_at_start(), [1]);
+        assert_eq!(fakes.downs_at_start(), [None]);
     }
 
     #[tokio::test(start_paused = true)]

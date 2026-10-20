@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -132,11 +133,18 @@ async fn read_stats<T: DeviceTransports>(device: &Device<T>, key: &PublicKey) ->
         .await
 }
 
-fn stop_device(runtime: &Handle, running: Running) {
-    let stopped = runtime.block_on(tokio::time::timeout(STOP_TIMEOUT, running.device.stop()));
-    if stopped.is_err() {
-        tracing::warn!("the WireGuard device did not stop in time");
-    }
+fn stop_within(
+    runtime: &Handle,
+    limit: Duration,
+    stop: impl Future<Output = ()>,
+) -> anyhow::Result<()> {
+    runtime
+        .block_on(tokio::time::timeout(limit, stop))
+        .map_err(|_| anyhow::anyhow!("the WireGuard device did not stop in time"))
+}
+
+fn stop_device(runtime: &Handle, running: Running) -> anyhow::Result<()> {
+    stop_within(runtime, STOP_TIMEOUT, running.device.stop())
 }
 
 impl WgBackend for UserspaceBackend {
@@ -185,10 +193,10 @@ impl WgBackend for UserspaceBackend {
     }
 
     fn down(&mut self) -> anyhow::Result<()> {
-        if let Some(running) = self.running.take() {
-            stop_device(&self.runtime, running);
+        match self.running.take() {
+            Some(running) => stop_device(&self.runtime, running),
+            None => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -198,7 +206,11 @@ impl Drop for UserspaceBackend {
             return;
         };
         let runtime = self.runtime.clone();
-        let stop = move || stop_device(&runtime, running);
+        let stop = move || {
+            if let Err(err) = stop_device(&runtime, running) {
+                tracing::warn!(%err, "device stop on drop failed");
+            }
+        };
         if Handle::try_current().is_ok() {
             super::background::spawn(stop);
         } else {
@@ -256,6 +268,20 @@ mod tests {
         fn mtu(&self) -> MtuWatcher {
             MtuWatcher::new(1420)
         }
+    }
+
+    #[tokio::test]
+    async fn a_stop_that_never_finishes_is_reported() {
+        let runtime = Handle::current();
+        let result = tokio::task::spawn_blocking(move || {
+            stop_within(&runtime, Duration::from_millis(50), pending())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "the WireGuard device did not stop in time"
+        );
     }
 
     #[test]

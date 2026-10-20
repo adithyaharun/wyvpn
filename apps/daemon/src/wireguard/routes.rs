@@ -320,6 +320,19 @@ mod tests {
     }
 
     #[test]
+    fn error_markers_are_exact() {
+        assert!(already_present(&std::io::Error::other(
+            "netsh exited with 1: Error 5010"
+        )));
+        assert!(ipv6_unavailable(&std::io::Error::other(
+            "The requested operation is not supported."
+        )));
+        assert!(!ipv6_unavailable(&std::io::Error::other(
+            "IPv6 is not available here"
+        )));
+    }
+
+    #[test]
     fn classifies_errors() {
         let exists = std::io::Error::other("The object already exists.");
         assert!(already_present(&exists));

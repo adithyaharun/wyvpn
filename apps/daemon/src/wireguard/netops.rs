@@ -375,7 +375,7 @@ pub fn route_command(
             if let Via::Gateway { gateway, .. } = &entry.via {
                 args.push(s("via"));
                 if gateway.is_ipv6() != v6 {
-                    args.push(s("inet6"));
+                    args.push(s(if gateway.is_ipv6() { "inet6" } else { "inet" }));
                 }
                 args.push(gateway.to_string());
             }
@@ -960,6 +960,22 @@ mod tests {
                 format!("-4 route {verb} 203.0.113.9/32 via inet6 fe80::1 dev eth0")
             );
         }
+    }
+
+    #[test]
+    fn a_v6_network_with_a_v4_gateway_says_inet() {
+        let entry = RouteEntry {
+            network: cidr("2001:db8::9/128"),
+            via: Via::Gateway {
+                gateway: "192.168.1.1".parse().unwrap(),
+                dev: "eth0".into(),
+            },
+        };
+        let command = route_command(Platform::Linux, &programs(), RouteOp::Add, &entry);
+        assert_eq!(
+            command.args.join(" "),
+            "-6 route add 2001:db8::9/128 via inet 192.168.1.1 dev eth0"
+        );
     }
 
     #[test]

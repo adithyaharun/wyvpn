@@ -9,6 +9,7 @@ pub trait Exec: Send + Sync {
 }
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const OUTPUT_FLOOR: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy)]
 pub struct SystemExec {
@@ -46,7 +47,11 @@ fn collected(receiver: Option<mpsc::Receiver<Vec<u8>>>, deadline: Instant) -> Ve
     receiver
         .and_then(|receiver| {
             receiver
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .recv_timeout(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .max(OUTPUT_FLOOR),
+                )
                 .ok()
         })
         .unwrap_or_default()

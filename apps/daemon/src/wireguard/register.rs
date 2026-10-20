@@ -128,14 +128,8 @@ pub async fn register_hosts(
     let mut best = BestError::default();
     let mut session = None;
     for host in hosts {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let attempt = wireguard::register_at_with_timeout(
-            client,
-            host,
-            profile,
-            &input,
-            timeouts.request.min(remaining),
-        );
+        let attempt =
+            wireguard::register_at_with_timeout(client, host, profile, &input, timeouts.request);
         match tokio::time::timeout_at(deadline, attempt).await {
             Ok(Ok(found)) => {
                 session = Some(found);

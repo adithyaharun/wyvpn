@@ -136,6 +136,7 @@ impl Tunnel {
             }),
         };
         if let Err(err) = tunnel.install_all(bypass, &tunnel_networks, config) {
+            let _ = tunnel.live_mut().persist();
             if let Err(cleanup) = tunnel.tear_down() {
                 tracing::warn!(error = %format!("{cleanup:#}"), "cleanup after a failed bring-up was incomplete");
             }
@@ -487,6 +488,20 @@ mod tests {
             assert!(!record.is_up);
         });
         assert!(!rig.record().exists());
+    }
+
+    #[test]
+    fn a_failed_cleanup_leaves_only_installed_routes_in_the_record() {
+        let rig = Rig::new();
+        rig.net.lock().fail_add = vec!["128.0.0.0/1".into()];
+        rig.net.lock().fail_delete = true;
+        let mut cfg = config();
+        cfg.routes = vec![route("0.0.0.0/0")];
+        let (tunnel, _) = up(&rig, &cfg);
+        assert!(tunnel.is_err());
+        let text = std::fs::read_to_string(rig.record()).unwrap();
+        assert!(text.contains("0.0.0.0/1") && text.contains("203.0.113.9/32"));
+        assert!(!text.contains("128.0.0.0/1"));
     }
 
     #[test]

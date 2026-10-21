@@ -99,6 +99,9 @@ pub fn run() {
             commands::open_support,
             commands::service_status,
             commands::register_service,
+            commands::repair_service,
+            commands::service_error,
+            commands::service_reapproval,
             commands::open_login_items,
             commands::third_party_licenses,
             commands::openvpn_notice,
@@ -140,6 +143,8 @@ pub fn run() {
                 shell::hide_main(&handle);
             }
             shell::start_events(&handle);
+            let reconcile = handle.clone();
+            tauri::async_runtime::spawn_blocking(move || shell::reconcile_service(&reconcile));
             Ok(())
         })
         .run(tauri::generate_context!());

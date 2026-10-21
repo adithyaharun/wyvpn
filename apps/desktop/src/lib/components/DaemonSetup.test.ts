@@ -75,4 +75,50 @@ describe("DaemonSetup", () => {
     expect(invoke.mock.calls.filter(([command]) => command === "register_service")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
   });
+
+  it("asks to approve again after an update without showing a raw error", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "service_status") return "requires_approval";
+      if (command === "service_reapproval") return true;
+      if (command === "service_error") return "Operation not permitted";
+      return null;
+    });
+    render(DaemonSetup, { setup: "requires_approval" });
+
+    expect(
+      await screen.findByText("WyVPN was updated. Approve its background service again in System Settings to continue."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/needs its background service approved/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Operation not permitted/)).not.toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole("button", { name: "Open System Settings" }));
+    expect(invoke).toHaveBeenCalledWith("open_login_items", undefined);
+    expect(screen.getByRole("button", { name: "Check again" })).toBeInTheDocument();
+  });
+
+  it("keeps the first-run copy when no update happened", async () => {
+    invoke.mockImplementation(async (command: string) =>
+      command === "service_status" ? "requires_approval" : false,
+    );
+    render(DaemonSetup, { setup: "requires_approval" });
+
+    expect(screen.getByText(/needs its background service approved/)).toBeInTheDocument();
+    expect(screen.queryByText(/was updated/)).not.toBeInTheDocument();
+  });
+
+  it("re-checks the status on demand", async () => {
+    invoke.mockImplementation(async (command: string) =>
+      command === "service_status" ? "requires_approval" : null,
+    );
+    render(DaemonSetup, { setup: "requires_approval" });
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("service_reapproval", undefined));
+    await vi.advanceTimersByTimeAsync(0);
+    const before = invoke.mock.calls.filter(([command]) => command === "service_status").length;
+
+    await fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    await vi.waitFor(() =>
+      expect(invoke.mock.calls.filter(([command]) => command === "service_status").length).toBeGreaterThan(before),
+    );
+  });
 });

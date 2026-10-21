@@ -38,7 +38,6 @@ fn is_final(err: &CoreError) -> bool {
         err,
         CoreError::Status(400..=499)
             | CoreError::CertificateChanged { .. }
-            | CoreError::PinRequired(_)
             | CoreError::InsecureScheme
     )
 }

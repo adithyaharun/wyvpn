@@ -6,11 +6,12 @@ use base64::engine::general_purpose::STANDARD;
 use crypto_box::aead::{Aead, OsRng};
 use crypto_box::{Nonce, PublicKey, SalsaBox, SecretKey};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+use wyvpn_core::Error as CoreError;
 use wyvpn_core::Secret;
 use wyvpn_core::Unsupported;
 use wyvpn_core::http::{ApiClient, HttpRequest, Method};
 use wyvpn_core::sign::hmac_base64;
-use wyvpn_core::tls::{Pins, TlsPolicy};
+use wyvpn_core::tls::{Fingerprint, Pins, TlsPolicy, pin_key};
 use wyvpn_core::wireguard::Platform;
 
 use super::*;
@@ -25,6 +26,7 @@ enum Reply {
     Deny(&'static str),
     Status(u16),
     WrongKey,
+    BadSignature,
 }
 
 struct Peer {
@@ -102,6 +104,15 @@ impl Respond for Peer {
                 &SecretKey::generate(&mut OsRng),
                 &serde_json::json!({"allow": true}),
             ),
+            Reply::BadSignature => {
+                let mut reply = envelope(
+                    &client,
+                    &self.secret,
+                    &serde_json::json!({"allow": true, "configuration": config(false), "reason": null}),
+                );
+                reply["signature"] = STANDARD.encode([0u8; 64]).into();
+                reply
+            }
             Reply::Status(code) => return ResponseTemplate::new(*code),
         };
         ResponseTemplate::new(200).set_body_json(reply)
@@ -204,9 +215,15 @@ fn device() -> DeviceInfo {
 }
 
 async fn run(profile: &Profile) -> Result<WireGuardSession, RegisterError> {
+    run_with(&client(), profile)
+        .await
+        .map(|found| found.session)
+}
+
+async fn run_with(client: &ApiClient, profile: &Profile) -> Result<Registration, RegisterError> {
     let hosts = profile.header.sync_hosts.clone();
     register_hosts(
-        &client(),
+        client,
         &hosts,
         profile,
         &device(),
@@ -438,7 +455,8 @@ async fn one_hung_host_cannot_use_the_whole_budget() {
         },
     )
     .await
-    .unwrap();
+    .unwrap()
+    .session;
     assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(live.requests().await, 1);
     assert_eq!(live.seen_keys(), [session.keys.public_key_base64()]);
@@ -513,4 +531,145 @@ async fn missing_pin_is_reported_even_without_usable_hosts() {
         err,
         RegisterError::Core(CoreError::MissingCredential(_))
     ));
+}
+
+struct TlsFront {
+    port: u16,
+    fingerprint: Fingerprint,
+}
+
+async fn tls_front(backend: std::net::SocketAddr) -> TlsFront {
+    let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+    let der = certified.cert.der().clone();
+    let fingerprint = Fingerprint::of_certificate(&der);
+    let key =
+        rustls::pki_types::PrivateKeyDer::try_from(certified.signing_key.serialize_der()).unwrap();
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![der], key)
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let Ok(mut tls) = acceptor.accept(stream).await else {
+                    return;
+                };
+                let Ok(mut plain) = tokio::net::TcpStream::connect(backend).await else {
+                    return;
+                };
+                let _ = tokio::io::copy_bidirectional(&mut tls, &mut plain).await;
+            });
+        }
+    });
+    TlsFront { port, fingerprint }
+}
+
+async fn tls_rig(reply: Reply) -> (Rig, TlsFront, Profile) {
+    let rig = Rig::start(reply).await;
+    let front = tls_front(*rig.server.address()).await;
+    let profile = rig.profile(&[format!("https://127.0.0.1:{}", front.port)], &[]);
+    (rig, front, profile)
+}
+
+async fn register_over_tls(
+    profile: &Profile,
+    pins: &Pins,
+) -> Result<(Registration, Option<LearnedPin>), RegisterError> {
+    let client = https_client(pins)?;
+    let hosts = profile.header.sync_hosts.clone();
+    let found = register_hosts(
+        &client,
+        &hosts,
+        profile,
+        &device(),
+        Some(PIN),
+        Timeouts::default(),
+    )
+    .await?;
+    let learned = learned_pin(&client, &found.host, pins);
+    Ok((found, learned))
+}
+
+#[tokio::test]
+async fn unpinned_ip_registration_reports_the_learned_pin() {
+    let (_rig, front, profile) = tls_rig(Reply::Accept { web_no_ssl: false }).await;
+    let (_, learned) = register_over_tls(&profile, &Pins::new()).await.unwrap();
+    assert_eq!(
+        learned,
+        Some((pin_key("127.0.0.1", front.port), front.fingerprint))
+    );
+}
+
+#[tokio::test]
+async fn pinned_ip_registration_learns_nothing_new() {
+    let (_rig, front, profile) = tls_rig(Reply::Accept { web_no_ssl: false }).await;
+    let pins = Pins::from([(pin_key("127.0.0.1", front.port), front.fingerprint)]);
+    let (_, learned) = register_over_tls(&profile, &pins).await.unwrap();
+    assert_eq!(learned, None);
+}
+
+#[tokio::test]
+async fn pinned_ip_with_a_different_certificate_is_refused() {
+    let (rig, front, profile) = tls_rig(Reply::Accept { web_no_ssl: false }).await;
+    let stale = Fingerprint::of_certificate(b"previous certificate");
+    let pins = Pins::from([(pin_key("127.0.0.1", front.port), stale)]);
+    match register_over_tls(&profile, &pins).await {
+        Err(RegisterError::Core(CoreError::CertificateChanged { expected, actual })) => {
+            assert_eq!(expected, stale.to_string());
+            assert_eq!(actual, front.fingerprint.to_string());
+        }
+        other => panic!("unexpected {:?}", other.err()),
+    }
+    assert_eq!(rig.requests().await, 0);
+}
+
+#[tokio::test]
+async fn unverified_registrations_fail() {
+    for reply in [
+        Reply::Deny("no"),
+        Reply::BadSignature,
+        Reply::WrongKey,
+        Reply::Status(500),
+    ] {
+        let (rig, _front, profile) = tls_rig(reply).await;
+        assert!(register_over_tls(&profile, &Pins::new()).await.is_err());
+        assert_eq!(rig.requests().await, 1);
+    }
+}
+
+#[tokio::test]
+async fn the_learned_pin_belongs_to_the_host_that_answered() {
+    let (live, front, _) = tls_rig(Reply::Accept { web_no_ssl: false }).await;
+    let (dead, dead_front, _) = tls_rig(Reply::Status(500)).await;
+    let dead_front_port = dead_front.port;
+    let hosts = [dead_front_port, front.port].map(|port| format!("https://127.0.0.1:{port}"));
+    let profile = live.profile(&hosts, &[]);
+    let (found, learned) = register_over_tls(&profile, &Pins::new()).await.unwrap();
+    assert_eq!(found.host, hosts[1]);
+    assert_eq!(
+        learned,
+        Some((pin_key("127.0.0.1", front.port), front.fingerprint))
+    );
+    assert_ne!(front.fingerprint, dead_front.fingerprint);
+    assert_eq!(dead.requests().await, 1);
+}
+
+#[test]
+fn a_changed_certificate_is_terminal() {
+    let err = RegisterError::Core(CoreError::CertificateChanged {
+        expected: "a".into(),
+        actual: "b".into(),
+    });
+    assert!(err.is_terminal());
+    assert!(!RegisterError::Timeout.is_terminal());
 }

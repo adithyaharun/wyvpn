@@ -10,7 +10,7 @@ use crate::session::Manager;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use wyvpn_core::Profile;
-use wyvpn_core::tls::Pins;
+use wyvpn_core::tls::{Fingerprint, Pins, has_pin};
 use wyvpn_ipc::{
     ConnectionState, ConnectionStatus, Event, LogLine, LogSource, ProfileSummary, Transport,
 };
@@ -144,6 +144,35 @@ impl State {
         self.profile_writes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn stored_pins(&self, profile_id: &str) -> Option<Pins> {
+        let _writes = self.lock_profiles();
+        self.source
+            .load(profile_id)
+            .ok()?
+            .map(|stored| stored.tls_pins)
+    }
+
+    pub fn learn_pin(&self, profile_id: &str, key: String, fingerprint: Fingerprint) {
+        let _writes = self.lock_profiles();
+        let saved = self.source.load(profile_id).and_then(|stored| {
+            let Some(mut stored) = stored else {
+                return Ok(());
+            };
+            let present = key
+                .rsplit_once(':')
+                .and_then(|(host, port)| Some(has_pin(&stored.tls_pins, host, port.parse().ok()?)))
+                .unwrap_or_else(|| stored.tls_pins.contains_key(&key));
+            if present {
+                return Ok(());
+            }
+            stored.tls_pins.insert(key, fingerprint);
+            self.source.save(&stored)
+        });
+        if let Err(err) = saved {
+            tracing::warn!(profile = %profile_id, error = %err, "cannot save the learned certificate pin");
+        }
     }
 
     fn log_buffer(&self) -> MutexGuard<'_, SessionLog> {
@@ -334,5 +363,70 @@ mod tests {
             events.try_recv().unwrap(),
             Event::StateChanged { ref profile_id, state: ConnectionState::Disconnected, .. } if profile_id == "a"
         ));
+    }
+
+    fn state_with_stored() -> (State, StoredProfile) {
+        let stored = crate::storage::tests::stored();
+        let state = State::new(MemoryProfiles::default());
+        state.source.save(&stored).unwrap();
+        (state, stored)
+    }
+
+    #[test]
+    fn a_learned_pin_is_saved_without_clobbering_concurrent_edits() {
+        let (state, stored) = state_with_stored();
+        let mut renamed = stored.clone();
+        renamed.display_name = Some("Renamed".into());
+        state.source.save(&renamed).unwrap();
+        let fingerprint = Fingerprint::of_certificate(b"learned");
+
+        state.learn_pin(&stored.id, "203.0.113.9:8000".into(), fingerprint);
+
+        let loaded = state.source.load(&stored.id).unwrap().unwrap();
+        assert_eq!(loaded.display_name.as_deref(), Some("Renamed"));
+        assert_eq!(loaded.tls_pins["203.0.113.9:8000"], fingerprint);
+        assert_eq!(loaded.tls_pins.len(), stored.tls_pins.len() + 1);
+    }
+
+    #[test]
+    fn a_learned_pin_never_replaces_an_existing_one() {
+        let (state, stored) = state_with_stored();
+        let (key, original) = stored.tls_pins.iter().next().unwrap();
+        state.learn_pin(
+            &stored.id,
+            key.clone(),
+            Fingerprint::of_certificate(b"other"),
+        );
+        let loaded = state.source.load(&stored.id).unwrap().unwrap();
+        assert_eq!(loaded.tls_pins[key], *original);
+    }
+
+    #[test]
+    fn a_learned_pin_agrees_with_an_old_style_mapped_key() {
+        let (state, mut stored) = state_with_stored();
+        let old = Fingerprint::of_certificate(b"old");
+        stored.tls_pins.insert("[::ffff:7f00:1]:8000".into(), old);
+        state.source.save(&stored).unwrap();
+        let before = stored.tls_pins.len();
+        state.learn_pin(
+            &stored.id,
+            "127.0.0.1:8000".into(),
+            Fingerprint::of_certificate(b"new"),
+        );
+        let loaded = state.source.load(&stored.id).unwrap().unwrap();
+        assert_eq!(loaded.tls_pins.len(), before);
+        assert!(!loaded.tls_pins.contains_key("127.0.0.1:8000"));
+    }
+
+    #[test]
+    fn a_learned_pin_for_a_removed_profile_is_dropped() {
+        let (state, stored) = state_with_stored();
+        state.source.remove(&stored.id).unwrap();
+        state.learn_pin(
+            &stored.id,
+            "203.0.113.9:8000".into(),
+            Fingerprint::of_certificate(b"x"),
+        );
+        assert!(state.source.load(&stored.id).unwrap().is_none());
     }
 }

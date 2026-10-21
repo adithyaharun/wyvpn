@@ -1,6 +1,6 @@
 use crate::auth::{decode_box_public_key, password_for, resolve_auth_token};
 use crate::error::{Error, Result, Unsupported};
-use crate::http::{ApiClient, HttpRequest, HttpResponse, Method};
+use crate::http::{ApiClient, HttpRequest, HttpResponse, Method, is_slash_redirect};
 use crate::profile::Profile;
 use crate::rng;
 use crate::secret::Secret;
@@ -550,8 +550,16 @@ impl WireRequest {
     }
 
     pub fn into_http(self, base_url: &str) -> Result<HttpRequest> {
+        self.into_http_at(base_url, false)
+    }
+
+    pub fn into_http_at(self, base_url: &str, slash: bool) -> Result<HttpRequest> {
         let mut url = Url::parse(base_url).map_err(|err| Error::InvalidUri(err.to_string()))?;
-        url.set_path(&self.path);
+        if slash {
+            url.set_path(&format!("{}/", self.path));
+        } else {
+            url.set_path(&self.path);
+        }
         Ok(HttpRequest {
             method: self.method,
             url,
@@ -986,17 +994,27 @@ pub async fn register_at_with_timeout(
     input: &RegistrationInput<'_>,
     timeout: Duration,
 ) -> Result<WireGuardSession> {
+    let origin = Url::parse(base_url).map_err(|err| Error::InvalidUri(err.to_string()))?;
+    let slash = client.prefers_slash(&origin);
     let pending = PendingRegistration::start(profile, input)?;
     let mut request = pending.request().clone();
     request.set_timeout(timeout);
-    let response = client.execute(request.into_http(base_url)?).await?;
+    let http = request.clone().into_http_at(base_url, slash)?;
+    let mut response = client.execute_cloned(&http).await?;
+    if !slash && is_slash_redirect(&http.url, &response) {
+        let http = request.into_http_at(base_url, true)?;
+        response = client.execute_cloned(&http).await?;
+        if !matches!(response.status, 307 | 308) {
+            client.remember_slash(&http.url);
+        }
+    }
     pending.finish(&response)
 }
 
 fn error_rank(err: &Error) -> u8 {
     match err {
         Error::Status(413 | 429) => 3,
-        Error::Status(_) | Error::PinRequired(_) => 2,
+        Error::Status(_) => 2,
         _ => 1,
     }
 }
@@ -1004,7 +1022,7 @@ fn error_rank(err: &Error) -> u8 {
 fn is_host_failure(err: &Error) -> bool {
     matches!(
         err,
-        Error::Http(_) | Error::Status(_) | Error::InvalidUri(_) | Error::PinRequired(_)
+        Error::Http(_) | Error::Status(_) | Error::InvalidUri(_)
     )
 }
 
@@ -1123,8 +1141,36 @@ pub async fn send_keepalive(
     session: &WireGuardSession,
     input: &KeepaliveInput<'_>,
 ) -> Result<Keepalive> {
+    send_keepalive_at(
+        client,
+        &session.config.keepalive_base_url(),
+        profile,
+        session,
+        input,
+    )
+    .await
+}
+
+pub async fn send_keepalive_at(
+    client: &ApiClient,
+    base_url: &str,
+    profile: &Profile,
+    session: &WireGuardSession,
+    input: &KeepaliveInput<'_>,
+) -> Result<Keepalive> {
+    let base = Url::parse(base_url).map_err(|err| Error::InvalidUri(err.to_string()))?;
+    let slash = client.prefers_slash(&base);
     let pending = PendingKeepalive::start(profile, session, input)?;
-    let response = client.execute(pending.http_request()?).await?;
+    let request = pending.request().clone();
+    let http = request.clone().into_http_at(base_url, slash)?;
+    let mut response = client.execute_cloned(&http).await?;
+    if !slash && is_slash_redirect(&http.url, &response) {
+        let http = request.into_http_at(base_url, true)?;
+        response = client.execute_cloned(&http).await?;
+        if !matches!(response.status, 307 | 308) {
+            client.remember_slash(&http.url);
+        }
+    }
     pending.finish(&response)
 }
 

@@ -10,8 +10,7 @@ use tokio::time::{MissedTickBehavior, interval};
 use wyvpn_core::http::ApiClient;
 use wyvpn_core::tls::{Fingerprint, Pins, TlsPolicy, pin_key};
 use wyvpn_core::wireguard::{
-    DeviceInfo, Keepalive, KeepaliveInput, Platform, WireGuardSession, registration_hosts,
-    send_keepalive,
+    DeviceInfo, Keepalive, KeepaliveInput, Platform, WireGuardSession, send_keepalive,
 };
 use wyvpn_core::{Error as CoreError, Profile};
 use zeroize::Zeroizing;
@@ -30,9 +29,14 @@ const EVENT_BUFFER: usize = 64;
 const REGISTRATION_BACKSTOP: Duration = Duration::from_secs(2);
 const GATE_TIMEOUT: Duration = Duration::from_secs(15);
 
+pub type LearnedPin = (String, Fingerprint);
+
+pub type PinSink = Arc<dyn Fn(String, Fingerprint) + Send + Sync>;
+
 pub struct WireGuardRequest {
     pub profile: Profile,
     pub pins: Pins,
+    pub on_learned_pin: Option<PinSink>,
     pub pin: Option<Zeroizing<String>>,
     pub device: DeviceInfo,
 }
@@ -40,6 +44,7 @@ pub struct WireGuardRequest {
 pub struct Registered {
     pub session: Arc<WireGuardSession>,
     pub pinger: Arc<dyn Pinger>,
+    pub learned_pin: Option<LearnedPin>,
 }
 
 pub trait Server: Send + Sync {
@@ -108,8 +113,15 @@ impl WireGuardLauncher {
         )
         .await
         .map_err(|_| RegisterError::Timeout)??;
+        let Registered {
+            session,
+            pinger,
+            learned_pin,
+        } = registered;
+        if let (Some(sink), Some((key, fingerprint))) = (&request.on_learned_pin, learned_pin) {
+            sink(key, fingerprint);
+        }
         drop(request);
-        let Registered { session, pinger } = registered;
 
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut cancel_on_drop = CancelOnDrop(Some(Arc::clone(&cancelled)));
@@ -321,12 +333,10 @@ pub fn keepalive_pins(
     pins
 }
 
-fn registration_fingerprint(client: &ApiClient, profile: &Profile) -> Option<Fingerprint> {
-    registration_hosts(profile)
-        .iter()
-        .rev()
-        .filter_map(|host| url::Url::parse(host).ok())
-        .find_map(|url| client.tls_observation(&url))
+fn registration_fingerprint(client: &ApiClient, host: &str) -> Option<Fingerprint> {
+    let url = url::Url::parse(host).ok()?;
+    client
+        .tls_observation(&url)
         .map(|observed| observed.fingerprint)
 }
 
@@ -363,18 +373,23 @@ impl Server for HttpsServer {
     ) -> BoxFuture<'a, Result<Registered, RegisterError>> {
         Box::pin(async move {
             let client = register::https_client(&request.pins)?;
-            let session = register::register(
+            let register::Registration { session, host } = register::register(
                 &client,
                 &request.profile,
                 &request.device,
                 request.pin.as_ref().map(|pin| pin.as_str()),
             )
             .await?;
+            let learned_pin = register::learned_pin(&client, &host, &request.pins);
+            let mut known = request.pins.clone();
+            if let Some((key, fingerprint)) = &learned_pin {
+                known.insert(key.clone(), *fingerprint);
+            }
             let pins = keepalive_pins(
-                &request.pins,
+                &known,
                 session.config.gateway,
                 session.config.web_port,
-                registration_fingerprint(&client, &request.profile),
+                registration_fingerprint(&client, &host),
             );
             let session = Arc::new(session);
             let pinger = HttpsPinger {
@@ -386,6 +401,7 @@ impl Server for HttpsServer {
             Ok(Registered {
                 session,
                 pinger: Arc::new(pinger),
+                learned_pin,
             })
         })
     }
@@ -488,6 +504,8 @@ pub mod testing {
         pub sessions: Arc<Mutex<Vec<Weak<WireGuardSession>>>>,
         pub pinger: Arc<ScriptedPinger>,
         pub deny: Arc<AtomicBool>,
+        pub learned: Arc<Mutex<Option<LearnedPin>>>,
+        pub seen_pins: Arc<Mutex<Vec<Pins>>>,
         pub unavailable: Arc<AtomicBool>,
         pub fail_up: Arc<Mutex<Option<String>>>,
         pub register_delay: Arc<Mutex<Duration>>,
@@ -503,6 +521,8 @@ pub mod testing {
         pinger: Arc<ScriptedPinger>,
         deny: Arc<AtomicBool>,
         delay: Arc<Mutex<Duration>>,
+        learned: Arc<Mutex<Option<LearnedPin>>>,
+        seen_pins: Arc<Mutex<Vec<Pins>>>,
         config: WireGuardConfig,
     }
 
@@ -539,10 +559,14 @@ pub mod testing {
     impl Server for FakeServer {
         fn register<'a>(
             &'a self,
-            _request: &'a WireGuardRequest,
+            request: &'a WireGuardRequest,
         ) -> BoxFuture<'a, Result<Registered, RegisterError>> {
             Box::pin(async move {
                 self.registrations.fetch_add(1, Ordering::SeqCst);
+                self.seen_pins
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(request.pins.clone());
                 let delay = *self.delay.lock().unwrap_or_else(PoisonError::into_inner);
                 if !delay.is_zero() {
                     tokio::time::sleep(delay).await;
@@ -564,7 +588,16 @@ pub mod testing {
                     script: self.pinger.clone(),
                     _session: Arc::clone(&session),
                 });
-                Ok(Registered { session, pinger })
+                let learned_pin = self
+                    .learned
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                Ok(Registered {
+                    session,
+                    pinger,
+                    learned_pin,
+                })
             })
         }
     }
@@ -582,6 +615,8 @@ pub mod testing {
                 sessions: Arc::default(),
                 pinger: Arc::default(),
                 deny: Arc::default(),
+                learned: Arc::default(),
+                seen_pins: Arc::default(),
                 unavailable: Arc::default(),
                 fail_up: Arc::default(),
                 register_delay: Arc::default(),
@@ -654,6 +689,8 @@ pub mod testing {
                     pinger: Arc::clone(&self.pinger),
                     deny: Arc::clone(&self.deny),
                     delay: Arc::clone(&self.register_delay),
+                    learned: Arc::clone(&self.learned),
+                    seen_pins: Arc::clone(&self.seen_pins),
                     config: self.config.clone(),
                 }),
                 parts: Arc::new(move || {
@@ -701,6 +738,7 @@ pub mod testing {
         WireGuardRequest {
             profile: Profile::parse(&crate::testdata::ovpn(&[])).unwrap(),
             pins: Pins::new(),
+            on_learned_pin: None,
             pin: Some(Zeroizing::new("0000".to_owned())),
             device: device_info(),
         }
@@ -854,6 +892,49 @@ mod tests {
         assert!(err.to_string().contains("root"));
         assert_eq!(fakes.registrations.load(Ordering::SeqCst), 0);
         assert_eq!(fakes.backend_count(), 0);
+    }
+
+    fn recording_sink() -> (PinSink, Arc<std::sync::Mutex<Vec<LearnedPin>>>) {
+        let seen: Arc<std::sync::Mutex<Vec<LearnedPin>>> = Arc::default();
+        let sink: PinSink = {
+            let seen = Arc::clone(&seen);
+            Arc::new(move |key, fingerprint| {
+                seen.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((key, fingerprint));
+            })
+        };
+        (sink, seen)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_learned_pin_is_handed_to_the_sink_after_registration() {
+        let fakes = Fakes::new();
+        let learned = (
+            "203.0.113.9:8000".to_owned(),
+            Fingerprint::of_certificate(b"c"),
+        );
+        *fakes.learned.lock().unwrap() = Some(learned.clone());
+        let (sink, seen) = recording_sink();
+        let mut req = request();
+        req.on_learned_pin = Some(sink);
+        assert!(fakes.launcher().launch_request(req).await.is_ok());
+        assert_eq!(*seen.lock().unwrap(), [learned]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_denied_registration_saves_no_pin() {
+        let fakes = Fakes::new();
+        fakes.deny.store(true, Ordering::SeqCst);
+        *fakes.learned.lock().unwrap() = Some((
+            "203.0.113.9:8000".to_owned(),
+            Fingerprint::of_certificate(b"c"),
+        ));
+        let (sink, seen) = recording_sink();
+        let mut req = request();
+        req.on_learned_pin = Some(sink);
+        assert!(fakes.launcher().launch_request(req).await.is_err());
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test(start_paused = true)]

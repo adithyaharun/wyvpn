@@ -325,6 +325,7 @@ pub fn launch_request(
             Ok(LaunchRequest::WireGuard(Box::new(WireGuardRequest {
                 profile: stored.profile.clone(),
                 pins: stored.tls_pins.clone(),
+                on_learned_pin: None,
                 pin: pin.map(|pin| Zeroizing::new(pin.to_owned())),
                 device: device_info(),
             })))
@@ -544,7 +545,10 @@ impl Session {
 
     async fn attempt(&mut self) -> Attempt {
         let deadline = Instant::now() + WATCHDOG;
-        let request = match launch_request(
+        if let Some(pins) = self.state.stored_pins(&self.stored.id) {
+            self.stored.tls_pins = pins;
+        }
+        let mut request = match launch_request(
             &self.stored,
             self.transport,
             self.pin.as_ref().map(|pin| pin.as_str()),
@@ -552,6 +556,13 @@ impl Session {
             Ok(request) => request,
             Err(error) => return Attempt::Failed(error),
         };
+        if let LaunchRequest::WireGuard(wireguard) = &mut request {
+            let state = Arc::clone(&self.state);
+            let id = self.stored.id.clone();
+            wireguard.on_learned_pin = Some(Arc::new(move |key, fingerprint| {
+                state.learn_pin(&id, key, fingerprint);
+            }));
+        }
         let launcher = Arc::clone(&self.launcher);
         let mut launch = launcher.launch(request);
         let launched = tokio::select! {
@@ -1743,6 +1754,7 @@ mod tests {
 
         use super::*;
         use crate::wireguard::launcher::testing::Fakes;
+        use wyvpn_core::tls::Fingerprint;
 
         struct WgRig {
             rig: Rig,
@@ -1839,6 +1851,27 @@ mod tests {
             wg.fakes
                 .backend(0)
                 .with(|record| assert_eq!(record.downs, 1));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_learned_pin_is_saved_and_enforced_on_reconnect() {
+            let mut wg = WgRig::new();
+            let key = "203.0.113.9:8000".to_owned();
+            let fingerprint = Fingerprint::of_certificate(b"learned");
+            *wg.fakes.learned.lock().unwrap() = Some((key.clone(), fingerprint));
+            wg.fakes.pinger.push(Ok(true));
+            wg.fakes.pinger.push(Ok(false));
+            wg.connected(0).await;
+            let stored = wg.rig.state.source.load(A).unwrap().unwrap();
+            assert_eq!(stored.tls_pins[&key], fingerprint);
+
+            wg.rig.until(ConnectionState::Connecting).await;
+            wg.backend(1).await;
+            wg.rig.until(ConnectionState::Connected).await;
+            let seen = wg.fakes.seen_pins.lock().unwrap();
+            assert_eq!(seen.len(), 2);
+            assert!(!seen[0].contains_key(&key));
+            assert_eq!(seen[1][&key], fingerprint);
         }
 
         #[tokio::test(start_paused = true)]

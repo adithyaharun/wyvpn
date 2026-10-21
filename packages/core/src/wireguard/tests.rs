@@ -89,7 +89,7 @@ impl FakeServer {
             &header("auth-timestamp")?,
             &auth_nonce,
             request.method.as_str(),
-            request.url.path(),
+            request.url.path().trim_end_matches('/'),
             &[&data, &nonce, &public, &signature],
         );
         if header("auth-signature")? != hmac_base64(&Secret::new(SYNC_SECRET), to_sign.as_bytes())
@@ -949,5 +949,295 @@ fn request_path_ids_must_use_the_safe_charset() {
                 "{field}={bad:?}"
             );
         }
+    }
+}
+
+struct Redirect(u16, fn(&str) -> String);
+
+impl Respond for Redirect {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        ResponseTemplate::new(self.0)
+            .insert_header("location", (self.1)(request.url.path()).as_str())
+    }
+}
+
+const BARE: &str = r"^/key/wg/[^/]+/[^/]+/[^/]+$";
+const SLASHED: &str = r"^/key/wg/[^/]+/[^/]+/[^/]+/$";
+
+async fn mount_redirect(server: &MockServer, pattern: &str, to: fn(&str) -> String) {
+    Mock::given(wiremock::matchers::path_regex(pattern))
+        .respond_with(Redirect(307, to))
+        .mount(server)
+        .await;
+}
+
+async fn serve_slash_only(mode: Mode) -> (MockServer, SecretKey) {
+    let secret = SecretKey::generate(&mut OsRng);
+    let server = MockServer::start().await;
+    mount_redirect(&server, BARE, |path| format!("{path}/")).await;
+    Mock::given(wiremock::matchers::path_regex(SLASHED))
+        .respond_with(FakeServer {
+            secret: SecretKey::from_bytes(secret.to_bytes()),
+            mode,
+        })
+        .mount(&server)
+        .await;
+    (server, secret)
+}
+
+async fn paths(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.path().to_owned())
+        .collect()
+}
+
+async fn redirect_only(pattern: &str, to: fn(&str) -> String) -> (MockServer, Profile) {
+    let secret = SecretKey::generate(&mut OsRng);
+    let server = MockServer::start().await;
+    mount_redirect(&server, pattern, to).await;
+    (server, profile_for(&secret, &[]))
+}
+
+fn keepalive_session(server: &MockServer) -> WireGuardSession {
+    let mut config = WireGuardConfig::from_json(config_json(&wg_public_key_b64())).unwrap();
+    config.gateway = Ipv4Addr::LOCALHOST;
+    config.web_port = server.address().port();
+    WireGuardSession {
+        keys: WireGuardKeys::generate(),
+        config,
+    }
+}
+
+#[tokio::test]
+async fn registration_follows_one_trailing_slash_redirect_and_resends_the_same_signature() {
+    let (mock, secret) = serve_slash_only(Mode::Accept).await;
+    let profile = profile_for(&secret, &[]);
+    let device = device();
+    let client = client();
+    let session = register_at(&client, &mock.uri(), &profile, &input(&device))
+        .await
+        .unwrap();
+    assert_eq!(session.config.address.to_string(), "10.200.0.5/24");
+
+    let seen = mock.received_requests().await.unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(!seen[0].url.path().ends_with('/'));
+    assert_eq!(seen[1].url.path(), format!("{}/", seen[0].url.path()));
+    for name in ["auth-nonce", "auth-timestamp", "auth-signature"] {
+        assert_eq!(seen[0].headers.get(name), seen[1].headers.get(name));
+    }
+    assert_eq!(seen[0].body, seen[1].body);
+
+    register_at(&client, &mock.uri(), &profile, &input(&device))
+        .await
+        .unwrap();
+    let all = paths(&mock).await;
+    assert_eq!(all.len(), 3);
+    assert!(all[2].ends_with('/'));
+}
+
+#[tokio::test]
+async fn registration_refuses_other_redirects() {
+    let targets: [fn(&str) -> String; 5] = [
+        |path| format!("{path}-other/"),
+        |path| format!("http://127.0.0.2:1{path}/"),
+        |path| format!("{path}/?x=1"),
+        |path| format!("{path}//"),
+        |_| "/".to_owned(),
+    ];
+    for to in targets {
+        let (mock, profile) = redirect_only(BARE, to).await;
+        let device = device();
+        let err = register_at(&client(), &mock.uri(), &profile, &input(&device))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Status(307)), "{err:?}");
+        assert_eq!(paths(&mock).await.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn registration_follows_only_once() {
+    let (mock, profile) = redirect_only(r"^/key/wg/", |path| {
+        if path.ends_with('/') {
+            format!("{path}x/")
+        } else {
+            format!("{path}/")
+        }
+    })
+    .await;
+    let device = device();
+    let err = register_at(&client(), &mock.uri(), &profile, &input(&device))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Status(307)), "{err:?}");
+    assert_eq!(paths(&mock).await.len(), 2);
+}
+
+#[tokio::test]
+async fn keepalive_follows_one_trailing_slash_redirect_and_resends_the_same_signature() {
+    let (mock, secret) = serve_slash_only(Mode::Keepalive).await;
+    let profile = profile_for(&secret, &[]);
+    let device = device();
+    let session = keepalive_session(&mock);
+    let input = KeepaliveInput {
+        device: &device,
+        auth_token: None,
+    };
+    let client = client();
+    let alive = send_keepalive(&client, &profile, &session, &input)
+        .await
+        .unwrap();
+    assert!(alive.status);
+    let seen = mock.received_requests().await.unwrap();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].method.as_str(), "PUT");
+    assert_eq!(seen[1].url.path(), format!("{}/", seen[0].url.path()));
+    for name in ["auth-nonce", "auth-timestamp", "auth-signature"] {
+        assert_eq!(seen[0].headers.get(name), seen[1].headers.get(name));
+    }
+    assert_eq!(seen[0].body, seen[1].body);
+
+    send_keepalive(&client, &profile, &session, &input)
+        .await
+        .unwrap();
+    let all = paths(&mock).await;
+    assert_eq!(all.len(), 3);
+    assert!(all[2].ends_with('/'));
+}
+
+#[tokio::test]
+async fn keepalive_refuses_other_and_repeated_redirects() {
+    let device = device();
+    let input = KeepaliveInput {
+        device: &device,
+        auth_token: None,
+    };
+    let (mock, profile) = redirect_only(BARE, |path| format!("{path}-other/")).await;
+    let session = keepalive_session(&mock);
+    let err = send_keepalive(&client(), &profile, &session, &input)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Status(307)), "{err:?}");
+    assert_eq!(paths(&mock).await.len(), 1);
+
+    let (mock, profile) = redirect_only(r"^/key/wg/", |path| {
+        if path.ends_with('/') {
+            format!("{path}x/")
+        } else {
+            format!("{path}/")
+        }
+    })
+    .await;
+    let session = keepalive_session(&mock);
+    let err = send_keepalive(&client(), &profile, &session, &input)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Status(307)), "{err:?}");
+    assert_eq!(paths(&mock).await.len(), 2);
+}
+
+#[tokio::test]
+async fn registration_follows_308_and_absolute_same_origin_locations() {
+    for status in [307, 308] {
+        let secret = SecretKey::generate(&mut OsRng);
+        let server = MockServer::start().await;
+        let origin = server.uri();
+        Mock::given(wiremock::matchers::path_regex(BARE))
+            .respond_with(Redirect(
+                status,
+                if status == 307 {
+                    |p| format!("{p}/")
+                } else {
+                    |p| format!("{p}/")
+                },
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(wiremock::matchers::path_regex(SLASHED))
+            .respond_with(FakeServer {
+                secret: SecretKey::from_bytes(secret.to_bytes()),
+                mode: Mode::Accept,
+            })
+            .mount(&server)
+            .await;
+        let profile = profile_for(&secret, &[]);
+        let device = device();
+        register_at(&client(), &origin, &profile, &input(&device))
+            .await
+            .unwrap();
+        assert_eq!(paths(&server).await.len(), 2);
+    }
+
+    let secret = SecretKey::generate(&mut OsRng);
+    let server = MockServer::start().await;
+    let origin = server.uri();
+    Mock::given(wiremock::matchers::path_regex(BARE))
+        .respond_with(AbsoluteRedirect(origin.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(wiremock::matchers::path_regex(SLASHED))
+        .respond_with(FakeServer {
+            secret: SecretKey::from_bytes(secret.to_bytes()),
+            mode: Mode::Accept,
+        })
+        .mount(&server)
+        .await;
+    let profile = profile_for(&secret, &[]);
+    let device = device();
+    register_at(&client(), &origin, &profile, &input(&device))
+        .await
+        .unwrap();
+    assert_eq!(paths(&server).await.len(), 2);
+}
+
+struct AbsoluteRedirect(String);
+
+impl Respond for AbsoluteRedirect {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        ResponseTemplate::new(307).insert_header(
+            "location",
+            format!("{}{}/", self.0, request.url.path()).as_str(),
+        )
+    }
+}
+
+#[tokio::test]
+async fn registration_refuses_cross_origin_and_scheme_relative_locations() {
+    let port = |server: &MockServer| server.address().port();
+    let cases: [fn(u16, &str) -> String; 4] = [
+        |p, path| format!("https://127.0.0.1:{p}{path}/"),
+        |p, path| format!("http://127.0.0.1:{}{path}/", p.wrapping_add(1)),
+        |p, path| format!("//127.0.0.1:{p}.evil.example{path}/"),
+        |p, path| format!("/\\127.0.0.1:{}{path}/", p.wrapping_add(1)),
+    ];
+    for case in cases {
+        let secret = SecretKey::generate(&mut OsRng);
+        let server = MockServer::start().await;
+        let p = port(&server);
+        Mock::given(wiremock::matchers::path_regex(BARE))
+            .respond_with(CaseRedirect(p, case))
+            .mount(&server)
+            .await;
+        let profile = profile_for(&secret, &[]);
+        let device = device();
+        let err = register_at(&client(), &server.uri(), &profile, &input(&device))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Status(307)), "{err:?}");
+        assert_eq!(paths(&server).await.len(), 1);
+    }
+}
+
+struct CaseRedirect(u16, fn(u16, &str) -> String);
+
+impl Respond for CaseRedirect {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        ResponseTemplate::new(307)
+            .insert_header("location", (self.1)(self.0, request.url.path()).as_str())
     }
 }

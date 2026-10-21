@@ -2,9 +2,11 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
+use super::launcher::LearnedPin;
 use thiserror::Error;
+use url::Url;
 use wyvpn_core::http::ApiClient;
-use wyvpn_core::tls::{Pins, TlsPolicy};
+use wyvpn_core::tls::{Pins, TlsPolicy, has_pin, pin_key};
 use wyvpn_core::wireguard::{
     self, BestError, DeviceInfo, RegistrationInput, WireGuardSession, registration_hosts,
 };
@@ -63,7 +65,9 @@ impl RegisterError {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Denied { .. } | Self::InsecureKeepalive | Self::Core(CoreError::Unsupported(_))
+            Self::Denied { .. }
+                | Self::InsecureKeepalive
+                | Self::Core(CoreError::Unsupported(_) | CoreError::CertificateChanged { .. })
         )
     }
 
@@ -100,12 +104,18 @@ impl Default for Timeouts {
     }
 }
 
+#[derive(Debug)]
+pub struct Registration {
+    pub session: WireGuardSession,
+    pub host: String,
+}
+
 pub async fn register(
     client: &ApiClient,
     profile: &Profile,
     device: &DeviceInfo,
     pin: Option<&str>,
-) -> Result<WireGuardSession, RegisterError> {
+) -> Result<Registration, RegisterError> {
     let hosts = registration_hosts(profile);
     register_hosts(client, &hosts, profile, device, pin, Timeouts::default()).await
 }
@@ -117,7 +127,7 @@ pub async fn register_hosts(
     device: &DeviceInfo,
     pin: Option<&str>,
     timeouts: Timeouts,
-) -> Result<WireGuardSession, RegisterError> {
+) -> Result<Registration, RegisterError> {
     wireguard::ensure_registrable(profile, pin)?;
     let input = RegistrationInput {
         device,
@@ -126,13 +136,16 @@ pub async fn register_hosts(
     };
     let deadline = Instant::now() + timeouts.total;
     let mut best = BestError::default();
-    let mut session = None;
+    let mut found = None;
     for host in hosts {
         let attempt =
             wireguard::register_at_with_timeout(client, host, profile, &input, timeouts.request);
         match tokio::time::timeout_at(deadline, attempt).await {
-            Ok(Ok(found)) => {
-                session = Some(found);
+            Ok(Ok(session)) => {
+                found = Some(Registration {
+                    session,
+                    host: host.clone(),
+                });
                 break;
             }
             Ok(Err(err)) => best.record(err)?,
@@ -145,13 +158,27 @@ pub async fn register_hosts(
             }
         }
     }
-    let Some(session) = session else {
+    let Some(registration) = found else {
         return Err(best.into_error().into());
     };
-    if session.config.web_no_ssl {
+    if registration.session.config.web_no_ssl {
         return Err(RegisterError::InsecureKeepalive);
     }
-    Ok(session)
+    Ok(registration)
+}
+
+pub fn learned_pin(client: &ApiClient, host: &str, pins: &Pins) -> Option<LearnedPin> {
+    let url = Url::parse(host).ok()?;
+    if !matches!(url.host()?, url::Host::Ipv4(_) | url::Host::Ipv6(_)) {
+        return None;
+    }
+    let port = url.port_or_known_default()?;
+    let name = url.host_str()?;
+    if has_pin(pins, name, port) {
+        return None;
+    }
+    let observed = client.tls_observation(&url)?;
+    Some((pin_key(name, port), observed.fingerprint))
 }
 
 #[cfg(test)]

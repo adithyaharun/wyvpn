@@ -40,6 +40,15 @@ load_openvpn_pins() {
   done
 }
 
+load_wintun_pins() {
+  # shellcheck disable=SC1091
+  source "$ROOT/packaging/wintun/VERSION"
+  local key
+  for key in WINTUN_VERSION WINTUN_DLL_SHA256; do
+    [ -n "${!key:-}" ] || die "$key missing from packaging/wintun/VERSION"
+  done
+}
+
 workspace_version() {
   awk '
     /^\[workspace\.package\]/ { f = 1; next }

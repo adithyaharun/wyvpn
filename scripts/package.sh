@@ -7,11 +7,11 @@ usage() {
   cat >&2 <<'EOF'
 Usage: scripts/package.sh <macos|windows|linux>
 
-Stages OpenVPN (macOS build, Windows fetch), wyvpnd and wyvpn-cli, the license
-notice, runs `tauri build` with the release config overlays and copies the
-installers into target/packaging/dist. On macOS it also signs (see
-scripts/macos-sign-notarize.sh). A staged OpenVPN matching
-packaging/openvpn/VERSION is reused.
+Stages OpenVPN (macOS build, Windows fetch), Wintun (Windows fetch), wyvpnd and
+wyvpn-cli, the license notice, runs `tauri build` with the release config
+overlays and copies the installers into target/packaging/dist. On macOS it also
+signs (see scripts/macos-sign-notarize.sh). A staged OpenVPN or Wintun matching
+packaging/openvpn/VERSION or packaging/wintun/VERSION is reused.
 EOF
 }
 
@@ -31,6 +31,12 @@ staged_openvpn() {
   [ -f "$1/COPYING" ] && [ "$(cat "$1/VERSION" 2>/dev/null)" = "$OPENVPN_VERSION" ]
 }
 
+staged_wintun() {
+  [ -f "$1/LICENSE.txt" ] && [ -f "$1/wintun.dll" ] \
+    && [ "$(cat "$1/VERSION" 2>/dev/null)" = "$WINTUN_VERSION" ] \
+    && [ "$(sha256_of "$1/wintun.dll")" = "$WINTUN_DLL_SHA256" ]
+}
+
 case "$PLATFORM" in
   macos)
     dir="$TAURI_DIR/resources/openvpn-macos"
@@ -46,11 +52,14 @@ case "$PLATFORM" in
     fi
     ;;
   windows)
-    dir="$TAURI_DIR/resources/openvpn-windows"
-    if ! staged_openvpn "$dir"; then
-      ps=powershell
-      command -v pwsh >/dev/null 2>&1 && ps=pwsh
+    ps=powershell
+    command -v pwsh >/dev/null 2>&1 && ps=pwsh
+    if ! staged_openvpn "$TAURI_DIR/resources/openvpn-windows"; then
       "$ps" -NoProfile -ExecutionPolicy Bypass -File "$ROOT/scripts/fetch-openvpn-windows.ps1"
+    fi
+    load_wintun_pins
+    if ! staged_wintun "$TAURI_DIR/resources/wintun-windows"; then
+      "$ps" -NoProfile -ExecutionPolicy Bypass -File "$ROOT/scripts/fetch-wintun-windows.ps1"
     fi
     ;;
 esac

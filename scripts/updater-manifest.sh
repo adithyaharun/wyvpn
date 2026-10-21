@@ -17,7 +17,8 @@ it warns and writes nothing; with only one platform signed it fails.
   --notes <text>          release notes (default: "WyVPN <version>")
   --only <macos|windows>  expect only this platform (local tests)
 
---publish replaces the notes with stdin and sets pub_date, for a published release.
+--publish replaces the notes with stdin up to the first line that is exactly
+"---" (the release body footer) and sets pub_date, for a published release.
 EOF
 }
 
@@ -47,6 +48,7 @@ publish() {
     || die "$file is not the manifest of $version"
   notes="$(cat)"
   notes="${notes//$'\r'/}"
+  notes="$(printf '%s\n' "$notes" | awk '$0 == "---" { exit } { print }')"
   [ -n "${notes//[[:space:]]/}" ] || notes="WyVPN $version"
   jq --arg notes "$notes" --arg pub_date "$pub_date" '.notes = $notes | .pub_date = $pub_date' \
     "$file" >"$file.tmp"

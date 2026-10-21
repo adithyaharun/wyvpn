@@ -77,6 +77,8 @@ jobs:
       - run: shellcheck -x scripts/*.sh
       - name: Updater scripts
         run: scripts/test-updater.sh
+      - name: Changelog
+        run: scripts/test-changelog.sh
       - name: systemd unit and package scripts
         run: packaging/linux/check-unit.sh
       - name: Wintun signer pins match the daemon

@@ -8,6 +8,7 @@ Releases are built by `.github/workflows/release.yml` on a `v*` tag. It builds t
 - [ ] Run `bun run version:sync` and commit the updated `tauri.conf.json` and `package.json` files. CI fails with `bun run version:check` if they drift.
 - [ ] Check the OpenVPN pin: `scripts/check-openvpn-update.sh`. To move to a newer 2.6.x, update every URL and SHA-256 in `packaging/openvpn/VERSION`. Verify the tarball and MSI against their `.asc` signatures from the OpenVPN security key first.
 - [ ] To move to a newer Wintun, update `packaging/wintun/VERSION`: the zip URL and SHA-256 (compare with the hash on wintun.net), the SHA-256 of `wintun/bin/amd64/wintun.dll` from that zip, and the signer pins. The publisher, issuer and issuer SHA-256 must match the pin in `apps/daemon/src/openvpn/signature.rs`; CI checks this.
+- [ ] In `CHANGELOG.md`, move the Unreleased entries into a new `## [x.y.z] - YYYY-MM-DD` section, leave `## [Unreleased]` empty, and update the link references at the bottom: `[Unreleased]` compares `vx.y.z...HEAD` and `[x.y.z]` compares the previous tag with `vx.y.z`. `scripts/changelog-section.sh x.y.z` prints the section; the release job uses it as the draft release body and as the `latest.json` notes, so it is what the in-app update prompt shows. Without that section the run fails in its first job. Write entries as plain text: the update prompt shows them as-is, so `**` and backticks appear literally (`scripts/changelog-section.sh --check` warns about them), and a line of only `---` ends the notes.
 - [ ] CI is green on `main`.
 
 ## 2. Tag
@@ -17,7 +18,7 @@ git tag -s v<version> -m "WyVPN <version>"
 git push origin v<version>
 ```
 
-The release job refuses a tag that does not match the `Cargo.toml` version.
+A `preflight` job runs first, before any build or signing approval. On a fresh runner it checks out only `scripts/`, `Cargo.toml` and `CHANGELOG.md`, refuses a tag that does not match the `Cargo.toml` version, and refuses a tag whose version has no `CHANGELOG.md` section with entries. The `release` job repeats both checks. A run started by hand from a branch skips `preflight` and still builds the installers.
 
 The run then pauses at the `updater-sign` job until you approve its `updater-signing` deployment: open the run in the Actions tab, choose **Review deployments**, tick `updater-signing` and approve. The `release` job, and with it the draft, waits for this step. A rejected or expired approval fails the run without a draft.
 
@@ -79,7 +80,7 @@ bunx tauri signer generate -w ~/.tauri/wyvpn.key
 - `updater-sign` job: on a fresh runner, in the `updater-signing` environment, it checks out only `scripts/`, `Cargo.toml` and `bun.lock`, checks that the tag matches the workspace version, downloads only those two artifacts, and signs both with `scripts/updater-sign.sh --pinned-cli`. That downloads `@tauri-apps/cli` and its Linux x64 binding at `TAURI_CLI_VERSION` (`scripts/lib.sh`) into an empty directory and refuses them unless their SHA-512 matches the integrity recorded in `bun.lock`, before the key is exported to anything. No repository build code or dependency install runs next to the key. The job uploads only the `.sig` files.
 
 The build jobs never see the key, and `scripts/package.sh` exits with an error if it finds the key in CI. Local release builds can still sign: with `TAURI_SIGNING_PRIVATE_KEY` set, `scripts/package.sh` signs the macOS archive itself, and `scripts/updater-sign.sh <file>` signs an MSI.
-- Release job: `scripts/updater-manifest.sh dist <version>` writes `latest.json`. `SHA256SUMS` covers the archive and the `.sig` files but not `latest.json`, because the publish step rewrites it.
+- Release job: `scripts/updater-manifest.sh --notes <changelog section> dist <version>` writes `latest.json`. `SHA256SUMS` covers the archive and the `.sig` files but not `latest.json`, because the publish step rewrites it.
 
 Unsigned and unnotarized installers are listed in the feed too. The minisign signature still proves they came from our CI. Once the code signing secrets exist, set the repository variable `REQUIRE_SIGNED_UPDATES` to `true` (`gh variable set REQUIRE_SIGNED_UPDATES --body true`). Without it, a release whose Apple or Windows signing silently failed (an expired certificate, a missing secret) would update signed installs to unsigned builds. With it, the `updater-sign` job fails with an error naming the file, and no draft is created.
 
@@ -108,7 +109,7 @@ Without `TAURI_SIGNING_PRIVATE_KEY` (local builds, forks, a missing secret) the 
 
 ### Draft and publish
 
-`releases/latest/download/latest.json` serves only the newest **published** release that is not a prerelease. Clients do not see a draft, so you can check it at leisure. When you publish, the "Update feed" workflow (`.github/workflows/update-feed.yml`) copies the release body into `notes`, sets `pub_date` to the publish time and uploads `latest.json` again. For about a minute after publishing, clients may see the draft placeholder notes; the version and signatures are already final. Editing the notes later does not update `latest.json`; run the workflow again with `gh workflow run update-feed.yml -f tag=v<version>`.
+`releases/latest/download/latest.json` serves only the newest **published** release that is not a prerelease. Clients do not see a draft, so you can check it at leisure. The draft body is the `CHANGELOG.md` section of the version, a `---` line, then the checksums note and, when it applies, the unsigned-installers note. When you publish, the "Update feed" workflow (`.github/workflows/update-feed.yml`) copies the release body up to the first `---` line into `notes`, sets `pub_date` to the publish time and uploads `latest.json` again. The prompt therefore shows the changelog section, with any edits made to it, but not the footer. For about a minute after publishing, clients may see the changelog section without later edits to the body; the version and signatures are already final. Editing the notes later does not update `latest.json`; run the workflow again with `gh workflow run update-feed.yml -f tag=v<version>`.
 
 ### First updater release
 
@@ -176,7 +177,7 @@ The Linux packages need OpenVPN 2.5 or later, so Ubuntu 22.04 (2.5.11) is the ol
 
 ## 7. Publish
 
-- [ ] Edit the draft release notes and publish. These notes are what the update prompt shows.
+- [ ] Review the draft notes (from `CHANGELOG.md`); fix the changelog rather than the draft where possible, then publish. The text above the `---` line is what the update prompt shows.
 - [ ] The "Update feed" workflow passed, and `curl -sL https://github.com/adithyaharun/wyvpn/releases/latest/download/latest.json | jq '.version, .notes'` shows the new version and the published notes.
 - [ ] On a machine with the previous release, **Check for Updates…** offers the new version.
 

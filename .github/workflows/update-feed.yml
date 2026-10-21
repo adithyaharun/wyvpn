@@ -1,0 +1,43 @@
+name: Update feed
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag, e.g. v0.2.0
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  notes:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Copy the release notes into latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] || { echo "::error::not a release tag: $TAG"; exit 1; }
+          release="$(gh release view "$TAG" --json isDraft,publishedAt,body,assets)"
+          if [ "$(jq -r .isDraft <<<"$release")" = true ]; then
+            echo "::error::$TAG is still a draft"
+            exit 1
+          fi
+          if ! jq -e '.assets | any(.name == "latest.json")' <<<"$release" >/dev/null; then
+            echo "::notice::$TAG has no latest.json"
+            exit 0
+          fi
+          gh release download "$TAG" --pattern latest.json --dir "$RUNNER_TEMP" --clobber
+          jq -r '.body // ""' <<<"$release" \
+            | scripts/updater-manifest.sh --publish "$RUNNER_TEMP/latest.json" "${TAG#v}" "$(jq -r .publishedAt <<<"$release")"
+          gh release upload "$TAG" "$RUNNER_TEMP/latest.json" --clobber

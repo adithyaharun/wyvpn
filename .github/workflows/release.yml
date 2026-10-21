@@ -84,7 +84,14 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: macos
-          path: target/packaging/dist/*
+          path: |
+            target/packaging/dist/*
+            !target/packaging/dist/*.app.tar.gz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-updater
+          path: target/packaging/dist/*.app.tar.gz
           if-no-files-found: error
 
   windows:
@@ -181,9 +188,53 @@ jobs:
           path: target/packaging/dist/*
           if-no-files-found: error
 
+  updater-sign:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows]
+    runs-on: ubuntu-22.04
+    environment: updater-signing
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /scripts/
+            /Cargo.toml
+            /bun.lock
+      - name: Check tag matches version
+        run: |
+          source scripts/lib.sh
+          check_tag_version "$GITHUB_REF_NAME"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: macos-updater
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows
+          path: dist
+      - name: Sign updater files
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          REQUIRE_SIGNED_UPDATES: ${{ vars.REQUIRE_SIGNED_UPDATES }}
+        run: |
+          shopt -s nullglob
+          files=(dist/*.app.tar.gz dist/*.msi)
+          [ ${#files[@]} -eq 2 ] || { echo "::error::expected one .app.tar.gz and one .msi, got ${files[*]}"; exit 1; }
+          args=(--pinned-cli --app-version "${GITHUB_REF_NAME#v}")
+          [ "$REQUIRE_SIGNED_UPDATES" != true ] || args+=(--require-signed)
+          scripts/updater-sign.sh "${args[@]}" "${files[@]}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: updater-signatures
+          path: dist/*.sig
+          if-no-files-found: ignore
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [macos, windows, linux]
+    needs: [macos, windows, linux, updater-sign]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -192,18 +243,25 @@ jobs:
       - name: Check tag matches version
         run: |
           source scripts/lib.sh
-          version="$(workspace_version)"
-          [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "::error::tag $GITHUB_REF_NAME does not match version $version"; exit 1; }
+          check_tag_version "$GITHUB_REF_NAME"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
       - name: OpenVPN corresponding source
         run: scripts/fetch-openvpn-source.sh dist
+      - name: Updater manifest
+        run: |
+          scripts/updater-manifest.sh dist "${GITHUB_REF_NAME#v}"
+          [ -f dist/latest.json ] || rm -f dist/*.app.tar.gz
       - name: Checksums
         working-directory: dist
         run: |
-          sha256sum -- * >SHA256SUMS
+          files=()
+          for file in *; do
+            [ "$file" = latest.json ] || files+=("$file")
+          done
+          sha256sum -- "${files[@]}" >SHA256SUMS
           cat SHA256SUMS
       - name: Create draft release
         env:

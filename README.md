@@ -19,6 +19,7 @@ I hate having a VPN client that takes horrendous amount of disk space, and I hop
 - DNS from the server applied per OS, and restored after a crash.
 - Per-session log from the daemon and the tunnel.
 - Desktop tray app with notifications and launch at login.
+- In-app updates on macOS and Windows, update notices on Linux.
 - `wyvpn-cli` for scripting, with `--json` output.
 - MCP server (`wyvpn-cli mcp`) so AI agents can list profiles, read status, and optionally connect or disconnect.
 
@@ -117,6 +118,19 @@ Current releases are not code-signed yet, so their files have `-unsigned` in the
 ### Building installers
 
 `bun run package:macos`, `bun run package:windows` and `bun run package:linux` build the installer for the current system. See [docs/release.md](docs/release.md) for the steps and the signing setup.
+
+## Updates
+
+WyVPN checks GitHub for a new version when it starts and once a day.
+
+- **macOS and Windows:** a prompt shows the new version and its release notes, with **Install** and **Later**. If a VPN session is active, the prompt says it will disconnect. **Install** disconnects the VPN, downloads the update, checks its signature, installs it and relaunches WyVPN. On Windows the installer shows a progress window and asks for administrator approval. If the download or the signature check fails, nothing is installed and WyVPN stays on the current version. Reconnect the VPN by hand after a failed install.
+- **Linux:** WyVPN only tells you that a version is available and opens its release page. Update with the new package as in [Linux](#linux).
+- **Check for Updates…** is in the tray menu, under **Settings › Support** and, on macOS, in the **WyVPN** menu. It works even with automatic checks turned off.
+- **Settings › Check for updates automatically** turns the launch and daily checks on or off. It is on by default.
+
+Privacy: each check is a request to `github.com`, which sees your IP address and that a WyVPN client checked for updates. Downloading an update also shows your platform and the version you download. Nothing else is sent. With automatic checks off, WyVPN contacts GitHub only when you choose **Check for Updates…**.
+
+Versions without **Check for Updates…** cannot update themselves. Install the first version that has it by hand; later versions arrive through the updater.
 
 ## Requirements
 

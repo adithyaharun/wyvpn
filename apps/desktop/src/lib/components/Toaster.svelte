@@ -57,7 +57,7 @@
       <div class="text">
         <p class="title">Something went wrong in WyVPN.</p>
         {#if toast.message}
-          <p class="message" title={toast.message}>{toast.message}</p>
+          <p class="message selectable" title={toast.message}>{toast.message}</p>
         {/if}
         <div class="actions">
           <CopyButton value={() => details(toast)} label="Copy details" text="Copy details" />

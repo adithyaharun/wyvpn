@@ -13,11 +13,11 @@
     <ServerOff class="glyph" size={16} strokeWidth={2} aria-hidden="true" />
     WyVPN service isn't running
   </h1>
-  <p>Start <span class="cmd">wyvpnd</span> on this computer. This window reconnects on its own once the service is up.</p>
+  <p>Start <span class="cmd selectable">wyvpnd</span> on this computer. This window reconnects on its own once the service is up.</p>
   {#if socket}
     <p class="socket">
       <span class="socket-label">Looking for</span>
-      <span class="socket-path">{socket}</span>
+      <span class="socket-path selectable">{socket}</span>
     </p>
   {/if}
 </section>
@@ -62,6 +62,5 @@
   .socket-path {
     color: var(--ink);
     overflow-wrap: anywhere;
-    user-select: text;
   }
 </style>

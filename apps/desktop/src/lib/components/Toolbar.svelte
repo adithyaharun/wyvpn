@@ -55,8 +55,6 @@
     padding: var(--toolbar-pad-top, 0) 8px var(--toolbar-pad-bottom, 0) var(--toolbar-inset);
     background: var(--surface);
     cursor: default;
-    user-select: none;
-    -webkit-user-select: none;
   }
 
   .name {

@@ -24,11 +24,11 @@
     <dl>
       <div>
         <dt>App</dt>
-        <dd>{mismatch.client_version} (protocol {mismatch.client_protocol})</dd>
+        <dd class="selectable">{mismatch.client_version} (protocol {mismatch.client_protocol})</dd>
       </div>
       <div>
         <dt>Service</dt>
-        <dd>
+        <dd class="selectable">
           {daemonVersion}{mismatch.daemon_protocol != null ? ` (protocol ${mismatch.daemon_protocol})` : ""}
         </dd>
       </div>
@@ -75,6 +75,5 @@
 
   dd {
     color: var(--ink);
-    user-select: text;
   }
 </style>

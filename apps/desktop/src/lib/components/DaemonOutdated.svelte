@@ -16,11 +16,11 @@
   <dl>
     <div>
       <dt>App</dt>
-      <dd>{mismatch.client_version}</dd>
+      <dd class="selectable">{mismatch.client_version}</dd>
     </div>
     <div>
       <dt>Service</dt>
-      <dd>{daemonVersion}</dd>
+      <dd class="selectable">{daemonVersion}</dd>
     </div>
   </dl>
   <p>If this stays after you disconnect, restart your Mac.</p>
@@ -59,6 +59,5 @@
 
   dd {
     color: var(--ink);
-    user-select: text;
   }
 </style>

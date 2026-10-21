@@ -13,7 +13,7 @@
   {#snippet failed(_error, reset)}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="failed" data-tauri-drag-region onmousedown={dragWindow}>
-      <p>This view couldn't be shown.</p>
+      <p class="selectable">This view couldn't be shown.</p>
       <button class="btn btn-secondary" type="button" onclick={reset}>Try again</button>
     </div>
   {/snippet}

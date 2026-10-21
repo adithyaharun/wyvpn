@@ -59,6 +59,31 @@ body {
   overflow: hidden;
 }
 
+body {
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+img,
+svg {
+  -webkit-user-drag: none;
+}
+
+input,
+textarea,
+[contenteditable]:not([contenteditable="false"]),
+.selectable,
+.alert {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.selectable,
+.alert {
+  cursor: text;
+}
+
 h1,
 h2,
 h3,

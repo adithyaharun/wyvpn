@@ -15,6 +15,7 @@ mod service;
 mod settings;
 mod shell;
 mod tray;
+mod updater;
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -63,10 +64,13 @@ fn build_tray(app: &tauri::AppHandle) -> bool {
 }
 
 pub fn run() {
-    let result = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+    let builder =
+        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _, _| {
             shell::show_main(app);
-        }))
+        }));
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    let result = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -106,6 +110,11 @@ pub fn run() {
             commands::third_party_licenses,
             commands::openvpn_notice,
             commands::window_chrome,
+            commands::update_state,
+            commands::check_for_updates,
+            commands::install_update,
+            commands::dismiss_update,
+            commands::open_update_page,
         ])
         .on_window_event(|window, event| {
             if window.label() != MAIN_WINDOW {
@@ -136,7 +145,9 @@ pub fn run() {
             let approval_pending = ctx.model().approval_pending();
             let tray_ok = build_tray(&handle);
             ctx.tray_ok.store(tray_ok, Ordering::Relaxed);
-            let autostarted = std::env::args().any(|arg| arg == AUTOSTART_ARG);
+            let after_update =
+                ctx.take_show_after_update(&handle.package_info().version.to_string());
+            let autostarted = !after_update && std::env::args().any(|arg| arg == AUTOSTART_ARG);
             if shell::start_visible(tray_ok, autostarted, approval_pending) {
                 shell::show_main(&handle);
             } else {
@@ -145,6 +156,7 @@ pub fn run() {
             shell::start_events(&handle);
             let reconcile = handle.clone();
             tauri::async_runtime::spawn_blocking(move || shell::reconcile_service(&reconcile));
+            tauri::async_runtime::spawn(updater::schedule(handle.clone()));
             Ok(())
         })
         .run(tauri::generate_context!());

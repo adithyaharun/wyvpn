@@ -32,13 +32,15 @@
     title: string;
     size?: "fit" | "full";
     closeOnBackdrop?: boolean;
+    closable?: boolean;
     onclose: () => void;
     children: Snippet;
   }
 
-  let { title, size = "fit", closeOnBackdrop = true, onclose, children }: Props = $props();
+  let { title, size = "fit", closeOnBackdrop = true, closable = true, onclose, children }: Props = $props();
 
   const id = $props.id();
+  const backdropCloses = $derived(closeOnBackdrop && closable);
   const token = Symbol();
 
   const trapFocus: Attachment<HTMLElement> = (node) => {
@@ -54,7 +56,7 @@
   function onkeydown(event: KeyboardEvent) {
     if (event.key !== "Escape" || openSheets.at(-1) !== token) return;
     event.preventDefault();
-    onclose();
+    if (closable) onclose();
   }
 </script>
 
@@ -64,9 +66,9 @@
 <div
   class="scrim"
   aria-hidden="true"
-  data-tauri-drag-region={closeOnBackdrop ? undefined : ""}
-  onmousedown={closeOnBackdrop ? undefined : dragWindow}
-  onclick={closeOnBackdrop ? onclose : undefined}
+  data-tauri-drag-region={backdropCloses ? undefined : ""}
+  onmousedown={backdropCloses ? undefined : dragWindow}
+  onclick={backdropCloses ? onclose : undefined}
   in:dim|global
   out:dim|global={{ leaving: true }}
 ></div>
@@ -83,7 +85,7 @@
 >
   <header class="head">
     <h2 id="{id}-title">{title}</h2>
-    <button class="btn btn-icon" type="button" aria-label="Close" title="Close" onclick={onclose}>
+    <button class="btn btn-icon" type="button" aria-label="Close" title="Close" disabled={!closable} onclick={onclose}>
       <X size={16} strokeWidth={1.75} aria-hidden="true" />
     </button>
   </header>

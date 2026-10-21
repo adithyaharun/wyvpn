@@ -1,12 +1,13 @@
 import { fireEvent, render, screen, within } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppInfo, NotificationPermission, ProfileSummary, Settings } from "$lib/types";
+import type { AppInfo, NotificationPermission, ProfileSummary, Settings, UpdateState } from "$lib/types";
 
 const invoke = vi.hoisted(() => vi.fn());
 const copyText = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("$lib/clipboard", () => ({ copyText }));
 
+import { updates } from "$lib/update.svelte";
 import SettingsSheet from "./SettingsSheet.svelte";
 
 function profile(id: string, name: string): ProfileSummary {
@@ -63,7 +64,7 @@ async function open(overrides: Overrides = {}) {
 describe("SettingsSheet", () => {
   beforeEach(() => {
     invoke.mockReset();
-    stored = { auto_connect_profile_id: null, auto_reconnect: true, notifications: true };
+    stored = { auto_connect_profile_id: null, auto_reconnect: true, notifications: true, check_updates: true };
     launch = false;
     permission = "granted";
     info = { version: "0.1.0", os: "macOS", arch: "aarch64" };
@@ -91,7 +92,7 @@ describe("SettingsSheet", () => {
     await open();
     await fireEvent.click(screen.getByRole("switch", { name: "Reconnect automatically" }));
     expect(invoke).toHaveBeenCalledWith("update_settings", {
-      settings: { auto_connect_profile_id: null, auto_reconnect: false, notifications: true },
+      settings: { auto_connect_profile_id: null, auto_reconnect: false, notifications: true, check_updates: true },
     });
     await vi.waitFor(() => expect(screen.getByRole("switch", { name: "Reconnect automatically" })).not.toBeChecked());
   });
@@ -101,7 +102,7 @@ describe("SettingsSheet", () => {
     invoke.mockClear();
     await fireEvent.click(screen.getByRole("switch", { name: "Notifications" }));
     expect(invoke).toHaveBeenCalledWith("update_settings", {
-      settings: { auto_connect_profile_id: null, auto_reconnect: true, notifications: false },
+      settings: { auto_connect_profile_id: null, auto_reconnect: true, notifications: false, check_updates: true },
     });
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("notification_permission", undefined));
   });
@@ -111,13 +112,13 @@ describe("SettingsSheet", () => {
     const picker = screen.getByRole("combobox", { name: "Default profile" });
     await fireEvent.change(picker, { target: { value: "p2" } });
     expect(invoke).toHaveBeenCalledWith("update_settings", {
-      settings: { auto_connect_profile_id: "p2", auto_reconnect: true, notifications: true },
+      settings: { auto_connect_profile_id: "p2", auto_reconnect: true, notifications: true, check_updates: true },
     });
 
     await vi.waitFor(() => expect(picker).toBeEnabled());
     await fireEvent.change(picker, { target: { value: "" } });
     expect(invoke).toHaveBeenLastCalledWith("update_settings", {
-      settings: { auto_connect_profile_id: null, auto_reconnect: true, notifications: true },
+      settings: { auto_connect_profile_id: null, auto_reconnect: true, notifications: true, check_updates: true },
     });
   });
 
@@ -222,6 +223,158 @@ describe("SettingsSheet", () => {
     it("disables the connection log while the service is unavailable", async () => {
       await open({ logAvailable: false });
       expect(screen.getByRole("button", { name: "Connection log" })).toBeDisabled();
+    });
+  });
+
+  describe("updates", () => {
+    beforeEach(() => {
+      updates.state = { state: "idle" };
+      updates.open = false;
+      updates.error = null;
+    });
+
+    function checkReturns(state: UpdateState | Promise<UpdateState>) {
+      const fallback = invoke.getMockImplementation();
+      invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) =>
+        command === "check_for_updates" ? state : fallback?.(command, args),
+      );
+    }
+
+    it("lays out the check row like the version row in every state", async () => {
+      const offer = {
+        version: "0.3.0",
+        notes: "",
+        date: null,
+        release_url: "https://github.com/adithyaharun/wyvpn/releases/tag/v0.3.0",
+      };
+      const cases: [UpdateState, string, string | null][] = [
+        [{ state: "idle" }, "", null],
+        [{ state: "checking" }, "Checking for updates…", null],
+        [{ state: "up_to_date" }, "WyVPN is up to date.", null],
+        [{ state: "failed", message: "Could not reach the update server." }, "Could not reach the update server.", null],
+        [{ state: "available", installable: true, ...offer }, "Version 0.3.0 is available.", "View update"],
+        [{ state: "dismissed", installable: false, ...offer }, "Version 0.3.0 is available.", "Open release page"],
+      ];
+
+      for (const [state, result, action] of cases) {
+        updates.state = state;
+        const { unmount } = render(SettingsSheet, { profiles, onclose: vi.fn(), onopenlog: vi.fn() });
+        const version = await screen.findByText("WyVPN 0.1.0");
+        const versionRow = version.closest(".row") as HTMLElement;
+        const title = screen.getByRole("button", { name: "Check for Updates…" });
+        const row = title.closest(".row") as HTMLElement;
+        const subtitle = document.getElementById(title.getAttribute("aria-describedby") ?? "") as HTMLElement;
+
+        expect(row.tagName).toBe(versionRow.tagName);
+        expect(row.parentElement).toBe(versionRow.parentElement);
+        expect(subtitle.parentElement).toBe(title.closest(".name")?.parentElement);
+        expect(subtitle.parentElement?.classList).toContain("version");
+        expect(subtitle).toHaveClass("help");
+        expect(subtitle.textContent?.trim()).toBe(result);
+        expect(getComputedStyle(subtitle).marginTop).toBe(getComputedStyle(version.nextElementSibling as Element).marginTop);
+        expect(getComputedStyle(subtitle).marginTop).toBe("0px");
+        expect(["", "auto"]).toContain(getComputedStyle(row).height);
+        expect(["", "visible"]).toContain(getComputedStyle(row).overflow);
+        expect(getComputedStyle(row).minHeight).toBe("32px");
+        expect(subtitle.classList.contains("warn")).toBe(state.state === "failed");
+        expect(row.querySelector(".spin") !== null).toBe(state.state === "checking");
+        expect(title).toHaveProperty("disabled", state.state === "checking");
+        if (action) expect(within(row).getByRole("button", { name: action })).toBeInTheDocument();
+        else expect(within(row).getAllByRole("button")).toEqual([title]);
+        unmount();
+      }
+    });
+
+    it("shows the stored automatic check setting", async () => {
+      stored = { ...stored, check_updates: false };
+      await open();
+      expect(screen.getByRole("switch", { name: "Check for updates automatically" })).not.toBeChecked();
+      expect(screen.getByText(/asks GitHub for a new version/)).toBeInTheDocument();
+    });
+
+    it("saves automatic update checks and round-trips the value", async () => {
+      await open();
+      const toggle = screen.getByRole("switch", { name: "Check for updates automatically" });
+      expect(toggle).toBeChecked();
+
+      await fireEvent.click(toggle);
+      expect(invoke).toHaveBeenCalledWith("update_settings", {
+        settings: { auto_connect_profile_id: null, auto_reconnect: true, notifications: true, check_updates: false },
+      });
+      await vi.waitFor(() => expect(toggle).toBeEnabled());
+      expect(toggle).not.toBeChecked();
+      expect(stored.check_updates).toBe(false);
+
+      await fireEvent.click(toggle);
+      await vi.waitFor(() => expect(toggle).toBeChecked());
+      expect(stored.check_updates).toBe(true);
+    });
+
+    it("starts a check, disables the row while it runs and shows the result", async () => {
+      let finish: (state: UpdateState) => void = () => {};
+      checkReturns(new Promise<UpdateState>((resolve) => (finish = resolve)));
+      await open();
+      const row = screen.getByRole("button", { name: "Check for Updates…" });
+
+      await fireEvent.click(row);
+      expect(invoke).toHaveBeenCalledWith("check_for_updates", undefined);
+      updates.state = { state: "checking" };
+      await vi.waitFor(() => expect(row).toBeDisabled());
+      expect(screen.getByText("Checking for updates…")).toBeInTheDocument();
+
+      finish({ state: "up_to_date" });
+      await vi.waitFor(() => expect(row).toBeEnabled());
+      expect(screen.getByText("WyVPN is up to date.")).toBeInTheDocument();
+      expect(updates.open).toBe(false);
+    });
+
+    it("works while automatic checks are off", async () => {
+      stored = { ...stored, check_updates: false };
+      checkReturns({ state: "up_to_date" });
+      await open();
+      await fireEvent.click(screen.getByRole("button", { name: "Check for Updates…" }));
+      expect(invoke).toHaveBeenCalledWith("check_for_updates", undefined);
+    });
+
+    it("shows a failed check inline", async () => {
+      checkReturns({ state: "failed", message: "Could not reach the update server." });
+      await open();
+      await fireEvent.click(screen.getByRole("button", { name: "Check for Updates…" }));
+      expect(await screen.findByText("Could not reach the update server.")).toBeInTheDocument();
+    });
+
+    it("opens the update sheet when a check finds an update", async () => {
+      const found: UpdateState = {
+        state: "available",
+        version: "0.3.0",
+        notes: "",
+        date: null,
+        installable: true,
+        release_url: "https://github.com/adithyaharun/wyvpn/releases/tag/v0.3.0",
+      };
+      checkReturns(found);
+      await open();
+      await fireEvent.click(screen.getByRole("button", { name: "Check for Updates…" }));
+      await vi.waitFor(() => expect(updates.open).toBe(true));
+      expect(screen.getByText("Version 0.3.0 is available.")).toBeInTheDocument();
+
+      updates.open = false;
+      await fireEvent.click(await screen.findByRole("button", { name: "View update" }));
+      expect(updates.open).toBe(true);
+    });
+
+    it("offers the release page for an update that is not installable", async () => {
+      updates.state = {
+        state: "dismissed",
+        version: "0.3.0",
+        notes: "",
+        date: null,
+        installable: false,
+        release_url: "https://github.com/adithyaharun/wyvpn/releases/tag/v0.3.0",
+      };
+      await open();
+      await fireEvent.click(screen.getByRole("button", { name: "Open release page" }));
+      expect(invoke).toHaveBeenCalledWith("open_update_page", undefined);
     });
   });
 });

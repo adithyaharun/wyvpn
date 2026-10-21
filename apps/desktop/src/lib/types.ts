@@ -112,6 +112,7 @@ export interface Settings {
   auto_connect_profile_id: string | null;
   auto_reconnect: boolean;
   notifications: boolean;
+  check_updates: boolean;
 }
 
 export interface StartupNotice {
@@ -134,3 +135,24 @@ export interface AppInfo {
 }
 
 export type SupportTarget = "project" | "issue" | "openvpn_source";
+
+export interface UpdateOffer {
+  version: string;
+  notes: string;
+  date: string | null;
+  installable: boolean;
+  release_url: string;
+}
+
+export type UpdateState =
+  | { state: "idle" | "checking" | "up_to_date" }
+  | ({ state: "available" | "dismissed" } & UpdateOffer)
+  | { state: "disconnecting" | "installing" | "relaunching"; version: string }
+  | { state: "downloading"; version: string; received: number; total: number | null }
+  | { state: "failed"; message: string };
+
+export type UpdatePromptOutcome = "available" | "up_to_date" | "failed";
+
+export interface UpdatePrompt {
+  outcome: UpdatePromptOutcome;
+}

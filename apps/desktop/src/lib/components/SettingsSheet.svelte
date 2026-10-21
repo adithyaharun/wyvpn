@@ -3,10 +3,13 @@
   import BellOff from "@lucide/svelte/icons/bell-off";
   import Bug from "@lucide/svelte/icons/bug";
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import CircleArrowDown from "@lucide/svelte/icons/circle-arrow-down";
+  import CloudDownload from "@lucide/svelte/icons/cloud-download";
   import Code from "@lucide/svelte/icons/code";
   import ExternalLink from "@lucide/svelte/icons/external-link";
   import Scale from "@lucide/svelte/icons/scale";
   import Info from "@lucide/svelte/icons/info";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import Power from "@lucide/svelte/icons/power";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import ScrollText from "@lucide/svelte/icons/scroll-text";
@@ -16,6 +19,7 @@
   import { describeError, toCommandError } from "$lib/errors";
   import { formatAppVersion } from "$lib/format";
   import type { AppInfo, NotificationPermission, ProfileSummary, Settings, SupportTarget } from "$lib/types";
+  import { offerOf, updateSummary, updates } from "$lib/update.svelte";
   import CopyButton from "./CopyButton.svelte";
   import Sheet from "./Sheet.svelte";
 
@@ -37,6 +41,9 @@
   let launchSaving = $state(false);
   let info = $state<AppInfo | null>(null);
   let error = $state<string | null>(null);
+
+  const updateResult = $derived(updates.error ?? updateSummary(updates.state));
+  const updateOffer = $derived(offerOf(updates.state));
 
   const missingDefault = $derived(
     settings?.auto_connect_profile_id != null &&
@@ -161,7 +168,7 @@
         {/if}
       </select>
       {#if missingDefault}
-        <p class="help warn">The default profile was removed. Choose another profile or None.</p>
+        <p class="help warn selectable">The default profile was removed. Choose another profile or None.</p>
       {/if}
     </div>
 
@@ -197,7 +204,7 @@
           Get notified when you connect or disconnect, when the connection drops, and when a PIN is needed.
         </p>
         {#if permission === "denied"}
-          <p class="help warn" id="{id}-notify-blocked" role="status">
+          <p class="help warn selectable" id="{id}-notify-blocked" role="status">
             Your system blocks notifications from WyVPN. Allow them in your system's notification settings.
           </p>
         {/if}
@@ -213,6 +220,27 @@
         onchange={(event) => save({ notifications: event.currentTarget.checked })}
       />
     </div>
+
+    <div class="setting">
+      <div class="text">
+        <CloudDownload class="glyph" size={14} strokeWidth={2} aria-hidden="true" />
+        <label for="{id}-updates">Check for updates automatically</label>
+        <p class="help" id="{id}-updates-help">
+          WyVPN asks GitHub for a new version when it starts and once a day. You can still check by hand when
+          this is off.
+        </p>
+      </div>
+      <input
+        id="{id}-updates"
+        class="switch"
+        type="checkbox"
+        role="switch"
+        aria-describedby="{id}-updates-help"
+        checked={settings?.check_updates ?? false}
+        disabled={!settings || saving}
+        onchange={(event) => save({ check_updates: event.currentTarget.checked })}
+      />
+    </div>
   </div>
 
   {#if error}
@@ -224,13 +252,44 @@
     {#if info}
       <div class="row">
         <Info class="glyph" size={14} strokeWidth={2} aria-hidden="true" />
-        <div class="version">
+        <div class="version selectable">
           <p class="name">WyVPN {info.version}</p>
           <p class="help">{info.os} {info.arch}</p>
         </div>
         <CopyButton value={formatAppVersion(info)} label="Copy version" />
       </div>
     {/if}
+    <div class="row">
+      <CircleArrowDown class="glyph" size={14} strokeWidth={2} aria-hidden="true" />
+      <div class="version">
+        <p class="name">
+          <button
+            class="title-action"
+            type="button"
+            aria-describedby="{id}-update-result"
+            disabled={updates.busy}
+            onclick={() => updates.check()}>Check for Updates…</button
+          >
+        </p>
+        <p
+          class="help selectable"
+          class:warn={updates.error !== null || updates.state.state === "failed"}
+          id="{id}-update-result"
+          role="status"
+        >
+          {updateResult ?? ""}
+        </p>
+      </div>
+      {#if updates.busy}
+        <LoaderCircle class="trail spin" size={14} strokeWidth={1.75} aria-hidden="true" />
+      {:else if updateOffer && !updates.error}
+        {#if updateOffer.installable}
+          <button class="btn btn-text" type="button" onclick={() => updates.show()}>View update</button>
+        {:else}
+          <button class="btn btn-text" type="button" onclick={() => updates.openPage()}>Open release page</button>
+        {/if}
+      {/if}
+    </div>
     <button class="row link" type="button" onclick={() => openSupport("project")}>
       <Code class="glyph" size={14} strokeWidth={2} aria-hidden="true" />
       <span class="name">GitHub project</span>
@@ -427,6 +486,23 @@
   }
 
   .link:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
+  .title-action {
+    padding: 0;
+    border: 0;
+    background: none;
+    text-align: start;
+    cursor: pointer;
+  }
+
+  .title-action:not(:disabled):hover {
+    text-decoration: underline;
+  }
+
+  .title-action:disabled {
     opacity: 0.45;
     cursor: default;
   }

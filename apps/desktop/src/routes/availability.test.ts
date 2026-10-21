@@ -57,7 +57,7 @@ function backend(
       case "service_status":
         return service;
       case "get_settings":
-        return { auto_connect_profile_id: null, auto_reconnect: false, notifications: false };
+        return { auto_connect_profile_id: null, auto_reconnect: false, notifications: false, check_updates: true };
       case "get_launch_at_login":
         return false;
       case "notification_permission":

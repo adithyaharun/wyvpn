@@ -13,6 +13,7 @@ import type {
   StartupNotice,
   SupportTarget,
   Transport,
+  UpdateState,
 } from "./types";
 
 async function call<T>(command: string, args?: InvokeArgs): Promise<T> {
@@ -56,4 +57,9 @@ export const api = {
   thirdPartyLicenses: () => call<string>("third_party_licenses"),
   openvpnNotice: () => call<OpenVpnNotice>("openvpn_notice"),
   openSupport: (target: SupportTarget) => call<null>("open_support", { target }),
+  updateState: () => call<UpdateState>("update_state"),
+  checkForUpdates: () => call<UpdateState>("check_for_updates"),
+  installUpdate: () => call<null>("install_update"),
+  dismissUpdate: () => call<UpdateState>("dismiss_update"),
+  openUpdatePage: () => call<null>("open_update_page"),
 };

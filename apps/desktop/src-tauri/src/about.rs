@@ -102,6 +102,8 @@ pub fn support_url(target: SupportTarget, info: &AppInfo) -> Url {
 #[cfg(target_os = "macos")]
 const MENU_LICENSES: &str = "licenses";
 #[cfg(target_os = "macos")]
+const MENU_CHECK_UPDATES: &str = "menu_check_updates";
+#[cfg(target_os = "macos")]
 const MENU_INSTALL_CLI: &str = "install_cli";
 #[cfg(target_os = "macos")]
 const MENU_UNINSTALL: &str = "uninstall";
@@ -126,6 +128,13 @@ pub fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         true,
         &[
             &PredefinedMenuItem::about(app, Some("About WyVPN"), Some(metadata))?,
+            &MenuItem::with_id(
+                app,
+                MENU_CHECK_UPDATES,
+                "Check for Updates…",
+                true,
+                None::<&str>,
+            )?,
             &MenuItem::with_id(
                 app,
                 MENU_LICENSES,
@@ -180,6 +189,7 @@ pub fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         &[&app_menu, &edit_menu, &window_menu],
     )?)?;
     app.on_menu_event(|app, event| match event.id().as_ref() {
+        MENU_CHECK_UPDATES => crate::updater::check_from_menu(app),
         MENU_LICENSES => crate::shell::show_licenses(app),
         MENU_INSTALL_CLI => crate::maintenance::install_cli(app),
         MENU_UNINSTALL => crate::maintenance::uninstall(app),
@@ -212,6 +222,12 @@ mod tests {
         assert!(body.starts_with("**What happened**\n\n\n**Steps to reproduce**\n\n\n---\n"));
         assert!(body.contains("WyVPN 1.2.3\nmacOS aarch64"));
         assert!(!url.as_str().contains(' '));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn app_menu_and_tray_use_different_update_ids() {
+        assert_ne!(MENU_CHECK_UPDATES, crate::model::CHECK_UPDATES);
     }
 
     #[test]

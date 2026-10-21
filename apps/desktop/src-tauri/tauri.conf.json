@@ -48,5 +48,17 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJBMDY1MzU0RjMyNzdGNkQKUldSdGZ5ZnpWRk1HS3VSYnhRWkZtRjE4ekJEcGg3OVhDRGNveUVSZ2lyRnVhSExKY0VMbjNxSUkK",
+      "endpoints": [
+        "https://github.com/adithyaharun/wyvpn/releases/latest/download/latest.json"
+      ],
+      "requireSignedVersion": true,
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

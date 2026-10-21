@@ -26,6 +26,11 @@ const COMMANDS: &[&str] = &[
     "third_party_licenses",
     "openvpn_notice",
     "window_chrome",
+    "update_state",
+    "check_for_updates",
+    "install_update",
+    "dismiss_update",
+    "open_update_page",
 ];
 
 fn main() {

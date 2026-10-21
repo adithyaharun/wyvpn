@@ -95,4 +95,19 @@ describe("StatusPanel", () => {
     });
     expect(screen.getByText("Work", { exact: false })).toBeInTheDocument();
   });
+
+  it("takes no space for the alert until there is an error", async () => {
+    const { rerender } = render(StatusPanel, { session: connected });
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toBe("");
+    expect(getComputedStyle(alert).marginTop).toBe("0px");
+    expect(["", "auto", "0px"]).toContain(getComputedStyle(alert).minHeight);
+
+    await rerender({
+      session: { ...connected, state: "error", error: { code: "timeout", message: "timed out" } },
+    });
+    expect(screen.getByRole("alert")).toBe(alert);
+    expect(alert.textContent).not.toBe("");
+    expect(getComputedStyle(alert).marginTop).toBe("8px");
+  });
 });

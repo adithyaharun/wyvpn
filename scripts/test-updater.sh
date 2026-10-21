@@ -101,6 +101,13 @@ check "publish sets pub_date" [ "$(field .pub_date "$m")" = 2026-10-21T04:31:00Z
 check "publish keeps the signatures" [ "$(field '.platforms | length' "$m")" = 3 ]
 printf '' | "$ROOT/scripts/updater-manifest.sh" --publish "$m" "$V" 2026-10-21T05:00:00Z 2>/dev/null
 check "publish with an empty body falls back" [ "$(field .notes "$m")" = "WyVPN $V" ]
+printf '### Fixed\r\n\r\n- one\r\n- a --- b\r\n\r\n---\r\n\r\nChecksums are in SHA256SUMS.\r\n\r\n---\r\nmore\r\n' \
+  | "$ROOT/scripts/updater-manifest.sh" --publish "$m" "$V" 2026-10-21T05:00:00Z 2>/dev/null
+check "publish drops the body footer after the first --- line" \
+  [ "$(field .notes "$m")" = $'### Fixed\n\n- one\n- a --- b' ]
+printf -- '---\nChecksums are in SHA256SUMS.\n' \
+  | "$ROOT/scripts/updater-manifest.sh" --publish "$m" "$V" 2026-10-21T05:00:00Z 2>/dev/null
+check "publish with only a footer falls back" [ "$(field .notes "$m")" = "WyVPN $V" ]
 check "publish refuses another version" \
   bash -c '! printf x | "$@" 2>/dev/null' _ "$ROOT/scripts/updater-manifest.sh" --publish "$m" 9.9.9 2026-10-21T05:00:00Z
 

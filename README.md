@@ -132,6 +132,8 @@ Privacy: each check is a request to `github.com`, which sees your IP address and
 
 Versions without **Check for Updates…** cannot update themselves. Install the first version that has it by hand; later versions arrive through the updater.
 
+What changed in each version is in [CHANGELOG.md](CHANGELOG.md). The release notes in the update prompt are that version's changelog section, without the checksums footer of the GitHub release.
+
 ## Requirements
 
 - Rust 1.95 or later

@@ -14,7 +14,33 @@ env:
   CARGO_ABOUT_VERSION: 0.9.2
 
 jobs:
+  preflight:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /scripts/
+            /Cargo.toml
+            /CHANGELOG.md
+      - name: Check tag matches version
+        run: |
+          source scripts/lib.sh
+          check_tag_version "$GITHUB_REF_NAME"
+      - name: Check CHANGELOG.md has the release section
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! scripts/changelog-section.sh "$version"; then
+            echo "::error::CHANGELOG.md has no entries for $version. Move Unreleased to [$version] in CHANGELOG.md before tagging."
+            exit 1
+          fi
+
   macos:
+    needs: preflight
+    if: ${{ !cancelled() && (needs.preflight.result == 'success' || needs.preflight.result == 'skipped') }}
     runs-on: macos-15
     env:
       APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
@@ -95,6 +121,8 @@ jobs:
           if-no-files-found: error
 
   windows:
+    needs: preflight
+    if: ${{ !cancelled() && (needs.preflight.result == 'success' || needs.preflight.result == 'skipped') }}
     runs-on: windows-latest
     env:
       WINDOWS_SIGNING: ${{ secrets.WINDOWS_CERTIFICATE != '' || (vars.AZURE_TRUSTED_SIGNING_ENDPOINT != '' && vars.AZURE_TRUSTED_SIGNING_ACCOUNT != '' && vars.AZURE_CERTIFICATE_PROFILE != '' && vars.AZURE_CODESIGNING_DLIB != '') }}
@@ -162,6 +190,8 @@ jobs:
           if-no-files-found: error
 
   linux:
+    needs: preflight
+    if: ${{ !cancelled() && (needs.preflight.result == 'success' || needs.preflight.result == 'skipped') }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -244,6 +274,14 @@ jobs:
         run: |
           source scripts/lib.sh
           check_tag_version "$GITHUB_REF_NAME"
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! scripts/changelog-section.sh "$version" >"$RUNNER_TEMP/notes.md"; then
+            echo "::error::CHANGELOG.md has no entries for $version. Move Unreleased to [$version] in CHANGELOG.md before tagging."
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/notes.md"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
@@ -252,7 +290,7 @@ jobs:
         run: scripts/fetch-openvpn-source.sh dist
       - name: Updater manifest
         run: |
-          scripts/updater-manifest.sh dist "${GITHUB_REF_NAME#v}"
+          scripts/updater-manifest.sh --notes "$(cat "$RUNNER_TEMP/notes.md")" dist "${GITHUB_REF_NAME#v}"
           [ -f dist/latest.json ] || rm -f dist/*.app.tar.gz
       - name: Checksums
         working-directory: dist
@@ -267,10 +305,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          unsigned=""
-          if compgen -G 'dist/*-unsigned.*' >/dev/null || compgen -G 'dist/*-unnotarized.*' >/dev/null; then
-            unsigned=$'\n\nSome installers in this release are not signed; their file names say so.'
-          fi
+          body="$RUNNER_TEMP/body.md"
+          {
+            cat "$RUNNER_TEMP/notes.md"
+            printf '\n---\n\nChecksums are in SHA256SUMS. The corresponding OpenVPN source is attached as openvpn-<version>.tar.gz.\n'
+            if compgen -G 'dist/*-unsigned.*' >/dev/null || compgen -G 'dist/*-unnotarized.*' >/dev/null; then
+              printf '\nSome installers in this release are not signed; their file names say so.\n'
+            fi
+          } >"$body"
           gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag \
             --title "WyVPN ${GITHUB_REF_NAME#v}" \
-            --notes "Checksums are in SHA256SUMS. The corresponding OpenVPN source is attached as openvpn-<version>.tar.gz.$unsigned"
+            --notes-file "$body"

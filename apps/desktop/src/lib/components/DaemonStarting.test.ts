@@ -74,6 +74,82 @@ describe("DaemonStarting", () => {
     expect(invoke).toHaveBeenCalledWith("daemon_state", undefined);
   });
 
+  describe("repair", () => {
+    async function openSlow() {
+      render(DaemonStarting, { socket: "/s" });
+      await vi.advanceTimersByTimeAsync(30_000);
+    }
+
+    it("is offered only after the grace period", async () => {
+      render(DaemonStarting, { socket: "/s" });
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(screen.queryByRole("button", { name: "Repair background service" })).not.toBeInTheDocument();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(screen.getByRole("button", { name: "Repair background service" })).toBeEnabled();
+    });
+
+    it("runs the repair, disables itself meanwhile and refreshes availability", async () => {
+      let finish: (status: string) => void = () => {};
+      invoke.mockImplementation((command: string) => {
+        if (command === "repair_service") return new Promise((resolve) => (finish = resolve));
+        if (command === "daemon_state") return Promise.resolve({ available: false, socket: "/s", status: "starting" });
+        return Promise.resolve(null);
+      });
+      await openSlow();
+
+      await fireEvent.click(screen.getByRole("button", { name: "Repair background service" }));
+      const busy = screen.getByRole("button", { name: "Repairing…" });
+      expect(busy).toBeDisabled();
+      expect(invoke).toHaveBeenCalledWith("repair_service", undefined);
+
+      finish("enabled");
+      await vi.waitFor(() => expect(screen.getByText(/Service repaired/)).toBeInTheDocument());
+      expect(invoke).toHaveBeenCalledWith("daemon_state", undefined);
+      expect(screen.getByRole("button", { name: "Repair background service" })).toBeEnabled();
+    });
+
+    it("shows the failure and allows another attempt", async () => {
+      invoke.mockImplementation((command: string) =>
+        command === "repair_service"
+          ? Promise.reject({ code: "service_setup", message: "denied" })
+          : Promise.resolve(null),
+      );
+      await openSlow();
+
+      await fireEvent.click(screen.getByRole("button", { name: "Repair background service" }));
+      await vi.waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+      expect(screen.queryByText(/Service repaired/)).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Repair background service" })).toBeEnabled();
+    });
+
+    it("picks up a launch error that arrives after the panel opened", async () => {
+      let recorded: string | null = null;
+      invoke.mockImplementation((command: string) =>
+        Promise.resolve(command === "service_error" ? recorded : null),
+      );
+      await openSlow();
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+      recorded = "could not register";
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(screen.getByRole("alert")).toHaveTextContent(/could not register/);
+
+      recorded = null;
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("shows an error recorded at launch", async () => {
+      invoke.mockImplementation((command: string) =>
+        Promise.resolve(command === "service_error" ? "could not register" : null),
+      );
+      await openSlow();
+
+      expect(screen.getByRole("alert")).toHaveTextContent(/could not register/);
+    });
+  });
+
   it("clears its timers on unmount", () => {
     const { unmount } = render(DaemonStarting, { socket: "/s" });
     expect(vi.getTimerCount()).toBeGreaterThan(0);

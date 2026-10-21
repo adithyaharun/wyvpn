@@ -116,6 +116,16 @@ impl Bridge {
             .clone()
     }
 
+    pub async fn handshake_version(&self, wait: Duration) -> Result<String, ClientError> {
+        timeout(
+            wait,
+            Client::connect(&self.socket, self.require_trusted_peer),
+        )
+        .await
+        .map_err(|_| ClientError::Closed)?
+        .map(|client| client.daemon_version().to_owned())
+    }
+
     pub fn set_availability(&self, value: DaemonAvailability) -> bool {
         let mut current = self
             .availability

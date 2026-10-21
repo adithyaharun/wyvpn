@@ -192,9 +192,13 @@ pub fn update_settings(
     ctx: State<'_, Ctx>,
     settings: Settings,
 ) -> CmdResult<Settings> {
-    let settings = settings.normalized();
-    let enabling = settings.notifications && !ctx.settings().notifications;
-    ctx.store_settings(settings.clone())
+    let mut enabling = false;
+    let settings = ctx
+        .modify_settings(|current| {
+            let next = settings.normalized().keeping_service_version(current);
+            enabling = next.notifications && !current.notifications;
+            *current = next;
+        })
         .map_err(|_| CmdError::io("could not save settings"))?;
     if enabling && let Err(error) = app.notification().request_permission() {
         tracing::warn!("notification permission request failed: {error}");
@@ -255,7 +259,7 @@ pub fn open_support(app: AppHandle, target: String) -> CmdResult<Value> {
 
 #[tauri::command]
 pub fn service_status(ctx: State<'_, Ctx>, app: AppHandle) -> Option<ServiceStatus> {
-    let status = service::applicable().then(service::status);
+    let status = service::applicable().then(|| ctx.service_status());
     ctx.refresh_service_state(&app);
     status
 }
@@ -267,18 +271,56 @@ pub async fn register_service(app: AppHandle) -> CmdResult<ServiceStatus> {
             "service setup is not needed here",
         ));
     }
-    let status = tauri::async_runtime::spawn_blocking(|| {
-        let current = service::status();
+    let version = app.package_info().version.to_string();
+    let handle = app.clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        let ctx = handle.state::<Ctx>();
+        let current = ctx.service_status();
         if !current.should_register() {
             return Ok(current);
         }
-        service::register().map_err(|message| CmdError::new("service_setup", &message))?;
+        let outcome =
+            service::register().map_err(|message| CmdError::new("service_setup", &message))?;
+        if outcome == service::Registration::Done {
+            ctx.register_service_recorded(&version);
+        }
         Ok(service::status())
     })
     .await
     .map_err(|_| CmdError::internal("service setup failed"))?;
     app.state::<Ctx>().refresh_service_state(&app);
     status
+}
+
+#[tauri::command]
+pub async fn repair_service(app: AppHandle) -> CmdResult<ServiceStatus> {
+    if !service::applicable() {
+        return Err(CmdError::invalid_request(
+            "service setup is not needed here",
+        ));
+    }
+    let version = app.package_info().version.to_string();
+    let handle = app.clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        handle
+            .state::<Ctx>()
+            .repair_service(&version)
+            .map_err(|message| CmdError::new("service_setup", &message))
+    })
+    .await
+    .map_err(|_| CmdError::internal("service repair failed"))?;
+    app.state::<Ctx>().refresh_service_state(&app);
+    status
+}
+
+#[tauri::command]
+pub fn service_reapproval(ctx: State<'_, Ctx>) -> bool {
+    ctx.reapproval()
+}
+
+#[tauri::command]
+pub fn service_error(ctx: State<'_, Ctx>) -> Option<String> {
+    ctx.service_error()
 }
 
 #[tauri::command]

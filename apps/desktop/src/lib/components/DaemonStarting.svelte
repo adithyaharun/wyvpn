@@ -4,6 +4,7 @@
   import { onMount } from "svelte";
   import { api } from "$lib/api";
   import { daemon } from "$lib/daemon.svelte";
+  import { describeError, toCommandError } from "$lib/errors";
 
   interface Props {
     socket: string;
@@ -15,10 +16,40 @@
   const POLL_MS = 2000;
   let slow = $state(false);
   let working = false;
+  let repairing = $state(false);
+  let repaired = $state(false);
+  let error = $state<string | null>(null);
+  let launchError = $state<string | null>(null);
+  const shownError = $derived(error ?? launchError);
+
+  async function repair() {
+    if (repairing) return;
+    repairing = true;
+    repaired = false;
+    error = null;
+    try {
+      await api.repairService();
+      repaired = true;
+      await daemon.refreshAvailability();
+    } catch (raw) {
+      error = describeError(toCommandError(raw).toBody());
+    } finally {
+      repairing = false;
+    }
+  }
+
+  async function loadLaunchError() {
+    try {
+      launchError = await api.serviceError();
+    } catch {
+      // The panel still works without it.
+    }
+  }
 
   async function tick() {
     if (working) return;
     working = true;
+    void loadLaunchError();
     try {
       const next = await api.serviceStatus();
       if (next !== null && next !== "enabled") await daemon.refreshAvailability();
@@ -53,9 +84,17 @@
         <span class="socket-path">{socket}</span>
       </p>
     {/if}
+    {#if shownError}
+      <p class="alert" role="alert">{shownError}</p>
+    {:else if repaired}
+      <p role="status">Service repaired. Waiting for it to start…</p>
+    {/if}
     <div class="actions">
       <button class="btn btn-primary" type="button" onclick={() => api.openLoginItems()}>
         Open System Settings
+      </button>
+      <button class="btn btn-secondary" type="button" disabled={repairing} onclick={repair}>
+        {repairing ? "Repairing…" : "Repair background service"}
       </button>
     </div>
   {:else}
@@ -103,6 +142,10 @@
     color: var(--ink);
     overflow-wrap: anywhere;
     user-select: text;
+  }
+
+  .alert {
+    color: var(--error);
   }
 
   .actions {

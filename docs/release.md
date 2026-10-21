@@ -7,6 +7,7 @@ Releases are built by `.github/workflows/release.yml` on a `v*` tag. It builds t
 - [ ] Bump `workspace.package.version` in the root `Cargo.toml`.
 - [ ] Run `bun run version:sync` and commit the updated `tauri.conf.json` and `package.json` files. CI fails with `bun run version:check` if they drift.
 - [ ] Check the OpenVPN pin: `scripts/check-openvpn-update.sh`. To move to a newer 2.6.x, update every URL and SHA-256 in `packaging/openvpn/VERSION`. Verify the tarball and MSI against their `.asc` signatures from the OpenVPN security key first.
+- [ ] To move to a newer Wintun, update `packaging/wintun/VERSION`: the zip URL and SHA-256 (compare with the hash on wintun.net), the SHA-256 of `wintun/bin/amd64/wintun.dll` from that zip, and the signer pins. The publisher, issuer and issuer SHA-256 must match the pin in `apps/daemon/src/openvpn/signature.rs`; CI checks this.
 - [ ] CI is green on `main`.
 
 ## 2. Tag
@@ -20,7 +21,7 @@ The release job refuses a tag that does not match the `Cargo.toml` version.
 
 ## 3. Secrets and variables
 
-Signing runs only when its secrets exist. Without them the installers are still built but named `*-unsigned` (or `*-unnotarized` on macOS when signed but not notarized). Unsigned builds also leave `WYVPN_TEAM_ID` and `WYVPN_PUBLISHER` unset. On macOS the daemon then checks the bundled OpenVPN against `WYVPN_OPENVPN_SHA256`, the hash of the final ad-hoc-signed binary pinned at build time. On Windows the official OpenVPN binaries keep their own signature, which the daemon accepts.
+Signing runs only when its secrets exist. Without them the installers are still built but named `*-unsigned` (or `*-unnotarized` on macOS when signed but not notarized). Unsigned builds also leave `WYVPN_TEAM_ID` and `WYVPN_PUBLISHER` unset. On macOS the daemon then checks the bundled OpenVPN against `WYVPN_OPENVPN_SHA256`, the hash of the final ad-hoc-signed binary pinned at build time. On Windows the official OpenVPN binaries and `wintun.dll` keep their own signatures, which the daemon accepts.
 
 | Name | Kind | Used for |
 |---|---|---|
@@ -51,7 +52,7 @@ Signing keys never live in the repository.
   - After copying the app to `/Applications`, `spctl -a -vv /Applications/WyVPN.app` reports `Notarized Developer ID`.
   - `codesign -dv --verbose=4` on `Contents/MacOS/wyvpnd`, `Contents/MacOS/wyvpn-cli` and `Contents/Resources/openvpn/openvpn` shows our Team ID and the `runtime` flag.
   - `xcrun stapler validate` passes on the `.dmg` and the app.
-- [ ] Windows: `Get-AuthenticodeSignature` reports `Valid` with our publisher for the `.msi`, `WyVPN.exe`, `wyvpnd.exe` and `wyvpn-cli.exe`. `openvpn\openvpn.exe` keeps the OpenVPN Inc. signature.
+- [ ] Windows: `Get-AuthenticodeSignature` reports `Valid` with our publisher for the `.msi`, `WyVPN.exe`, `wyvpnd.exe` and `wyvpn-cli.exe`. `openvpn\openvpn.exe` keeps the OpenVPN Inc. signature, and `wintun.dll` (next to `wyvpnd.exe`) keeps the WireGuard LLC signature; the release job checks the latter with `scripts/check-windows-msi.ps1`.
 
 ## 5. Smoke-test the installers
 
@@ -80,6 +81,7 @@ The installers land in `target/packaging/dist`. The packaging scripts stage file
 
 - `scripts/stage-binaries.sh` puts the sidecars in `apps/desktop/src-tauri/binaries/`.
 - `scripts/build-openvpn-macos.sh` and `scripts/fetch-openvpn-windows.ps1` stage OpenVPN in `apps/desktop/src-tauri/resources/openvpn-*`. On Windows the fetch script needs `7z` on `PATH` (preinstalled on GitHub runners) to unpack the ovpn-dco driver from the MSI.
+- `scripts/fetch-wintun-windows.ps1` checks the Wintun zip and `wintun.dll` against `packaging/wintun/VERSION`, checks the WireGuard LLC signature, and stages the DLL and its license in `apps/desktop/src-tauri/resources/wintun-windows`.
 - `scripts/gen-licenses.sh` writes `apps/desktop/src-tauri/resources/THIRD_PARTY_LICENSES`.
 
 These files are referenced from the `tauri.release*.conf.json` overlays, which only `scripts/package.sh` passes to `tauri build`. That way `tauri dev`, `cargo check -p wyvpn-app` and a plain `bun run build` work without them on every OS. A plain `bun run build` produces a bundle without the daemon, the CLI or OpenVPN, so it is not something to ship.

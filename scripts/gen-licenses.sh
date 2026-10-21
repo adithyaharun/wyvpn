@@ -51,6 +51,17 @@ rule() { printf '%s\n' "========================================================
       echo
     done
   done
+  wintun="$TAURI_DIR/resources/wintun-windows"
+  if [ -f "$wintun/LICENSE.txt" ]; then
+    rule
+    echo "Wintun $(cat "$wintun/VERSION" 2>/dev/null || echo)"
+    echo
+    echo "The Windows package bundles the unmodified wintun.dll, signed by WireGuard LLC,"
+    echo "under the license below."
+    echo
+    cat "$wintun/LICENSE.txt"
+    echo
+  fi
   rule
   cat "$WORK/rust.txt"
   rule

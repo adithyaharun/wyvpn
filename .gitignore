@@ -9,3 +9,5 @@ node_modules/
 /apps/desktop/src-tauri/binaries/
 /apps/desktop/src-tauri/resources/THIRD_PARTY_LICENSES
 /apps/desktop/src-tauri/resources/openvpn-*/
+/apps/desktop/src-tauri/resources/wintun-*/
+/apps/desktop/src-tauri/resources/THIRD_PARTY_PACKAGES.json

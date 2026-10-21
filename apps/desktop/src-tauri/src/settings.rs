@@ -11,6 +11,7 @@ pub struct Settings {
     pub auto_connect_profile_id: Option<String>,
     pub auto_reconnect: bool,
     pub notifications: bool,
+    pub service_version: Option<String>,
 }
 
 impl Default for Settings {
@@ -19,6 +20,7 @@ impl Default for Settings {
             auto_connect_profile_id: None,
             auto_reconnect: true,
             notifications: true,
+            service_version: None,
         }
     }
 }
@@ -50,6 +52,11 @@ impl Settings {
         self.auto_connect_profile_id = self
             .auto_connect_profile_id
             .filter(|id| !id.trim().is_empty());
+        self
+    }
+
+    pub fn keeping_service_version(mut self, current: &Settings) -> Self {
+        self.service_version.clone_from(&current.service_version);
         self
     }
 
@@ -108,6 +115,7 @@ mod tests {
             auto_connect_profile_id: Some("p1".into()),
             auto_reconnect: false,
             notifications: false,
+            service_version: Some("0.1.0".into()),
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);
@@ -135,6 +143,32 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, vec![std::ffi::OsString::from("settings.json")]);
+    }
+
+    #[test]
+    fn files_without_a_service_version_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, b"{\"auto_reconnect\": false}").unwrap();
+        let settings = Settings::load(&path);
+        assert_eq!(settings.service_version, None);
+        assert!(!settings.auto_reconnect);
+    }
+
+    #[test]
+    fn frontend_updates_cannot_change_the_service_version() {
+        let current = Settings {
+            service_version: Some("0.2.0".into()),
+            ..Settings::default()
+        };
+        let incoming = Settings {
+            notifications: false,
+            service_version: None,
+            ..Settings::default()
+        };
+        let merged = incoming.keeping_service_version(&current);
+        assert_eq!(merged.service_version.as_deref(), Some("0.2.0"));
+        assert!(!merged.notifications);
     }
 
     #[test]

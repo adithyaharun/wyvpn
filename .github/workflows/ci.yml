@@ -77,3 +77,18 @@ jobs:
       - run: shellcheck -x scripts/*.sh
       - name: systemd unit and package scripts
         run: packaging/linux/check-unit.sh
+      - name: Wintun signer pins match the daemon
+        run: |
+          source packaging/wintun/VERSION
+          for pin in "$WINTUN_PUBLISHER" "$WINTUN_ISSUER" "$WINTUN_ISSUER_SHA256"; do
+            grep -qF "\"$pin\"" apps/daemon/src/openvpn/signature.rs \
+              || { echo "::error::$pin from packaging/wintun/VERSION is not pinned in apps/daemon/src/openvpn/signature.rs"; exit 1; }
+          done
+
+  wintun:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Fetch and verify wintun.dll
+        shell: pwsh
+        run: ./scripts/fetch-wintun-windows.ps1

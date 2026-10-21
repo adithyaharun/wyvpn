@@ -41,8 +41,9 @@ function Get-Targets {
 }
 
 function Test-Skip([IO.FileInfo]$File) {
-    # bundled OpenVPN files keep their upstream signatures
+    # bundled OpenVPN files and wintun.dll keep their upstream signatures, which the daemon pins
     if ($File.FullName -match '[\\/](openvpn|openvpn-windows)[\\/]') { return $true }
+    if ($File.Name -eq 'wintun.dll') { return $true }
     return (Get-AuthenticodeSignature -LiteralPath $File.FullName).Status -eq 'Valid'
 }
 

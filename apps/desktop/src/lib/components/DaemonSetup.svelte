@@ -16,6 +16,7 @@
   let current = $state<ServiceStatus | null>(null);
   let error = $state<string | null>(null);
   let working = false;
+  let updated = $state(false);
 
   const status = $derived(current ?? setup);
 
@@ -35,6 +36,7 @@
       const next = await api.serviceStatus();
       if (next === null) return;
       current = next;
+      updated = await api.serviceReapproval().catch(() => updated);
       if ((next === "not_registered" || next === "not_found") && error === null) await register();
       if (current === "enabled") await daemon.refreshAvailability();
     } catch (raw) {
@@ -61,7 +63,11 @@
     <ShieldCheck class="glyph" size={16} strokeWidth={2} aria-hidden="true" />
     Approve the WyVPN background service
   </h1>
-  <p>WyVPN needs its background service approved before it can connect.</p>
+  {#if updated}
+    <p>WyVPN was updated. Approve its background service again in System Settings to continue.</p>
+  {:else}
+    <p>WyVPN needs its background service approved before it can connect.</p>
+  {/if}
 
   {#if error}
     <p class="alert" role="alert">{error}</p>
@@ -75,6 +81,7 @@
       <button class="btn btn-primary" type="button" onclick={() => api.openLoginItems()}>
         Open System Settings
       </button>
+      <button class="btn btn-secondary" type="button" onclick={() => void tick()}>Check again</button>
     </div>
   {:else if status === "enabled"}
     <p role="status">Approved. Starting the service…</p>

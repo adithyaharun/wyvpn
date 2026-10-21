@@ -14,11 +14,12 @@ use wyvpn_ipc::{ConnectionState, ConnectionStatus, Event, ProfileSummary, Reques
 use crate::autoconnect::{self, Decision};
 use crate::bridge::{Bridge, BridgeMsg, DaemonAvailability, EventConfig};
 use crate::chrome;
+use crate::client::ClientError;
 use crate::error::sanitize;
 use crate::model::{APPROVE_SERVICE, AvailabilityPayload, COPY_TUNNEL_IP, DaemonStatus, Model};
 use crate::notifications::{self, Kind, Notification};
 use crate::retry::RetryStore;
-use crate::service::{self, ServiceStatus};
+use crate::service::{self, LaunchAction, ServiceStatus};
 use crate::settings::Settings;
 use crate::tray::{self, Rendered};
 
@@ -31,11 +32,21 @@ pub const PROFILES_CHANNEL: &str = "daemon://profiles";
 pub const LICENSES_CHANNEL: &str = "app://open-licenses";
 pub const WINDOW_CHROME_CHANNEL: &str = "app://window-chrome";
 pub const DEFAULT_MISSING_CHANNEL: &str = "app://default-profile-missing";
+const DAEMON_GRACE: Duration = Duration::from_secs(8);
+const PROBE_WAIT: Duration = Duration::from_secs(2);
 const USER_DISCONNECT_WINDOW: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StartupNotice {
     pub profile_id: String,
+}
+
+struct FlagGuard<'a>(&'a AtomicBool);
+
+impl Drop for FlagGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 pub struct Ctx {
@@ -52,6 +63,10 @@ pub struct Ctx {
     auto_connect_pending: Mutex<Option<String>>,
     subscribed: AtomicBool,
     approval_notified: AtomicBool,
+    repairing: AtomicBool,
+    startup_hold: AtomicBool,
+    reapproval: AtomicBool,
+    service_error: Mutex<Option<String>>,
     startup_notice: Mutex<Option<StartupNotice>>,
     issued: AtomicU64,
     applied: AtomicU64,
@@ -77,6 +92,10 @@ impl Ctx {
             auto_connect_pending: Mutex::default(),
             subscribed: AtomicBool::new(false),
             approval_notified: AtomicBool::new(false),
+            repairing: AtomicBool::new(false),
+            startup_hold: AtomicBool::new(true),
+            reapproval: AtomicBool::new(false),
+            service_error: Mutex::default(),
             startup_notice: Mutex::default(),
             issued: AtomicU64::new(0),
             applied: AtomicU64::new(0),
@@ -103,14 +122,80 @@ impl Ctx {
             .clone()
     }
 
-    pub fn store_settings(&self, settings: Settings) -> std::io::Result<()> {
+    pub fn modify_settings(&self, change: impl FnOnce(&mut Settings)) -> std::io::Result<Settings> {
         let path = self
             .settings_path
             .as_deref()
             .ok_or_else(|| std::io::Error::other("no config directory"))?;
-        settings.save(path)?;
-        *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = settings;
-        Ok(())
+        let mut guard = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut next = guard.clone();
+        change(&mut next);
+        next.save(path)?;
+        *guard = next.clone();
+        Ok(next)
+    }
+
+    pub fn service_status(&self) -> ServiceStatus {
+        if self.repairing.load(Ordering::SeqCst) {
+            ServiceStatus::Enabled
+        } else {
+            service::status()
+        }
+    }
+
+    pub fn service_error(&self) -> Option<String> {
+        self.service_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn record_service_version(&self, version: &str) {
+        if let Err(error) =
+            self.modify_settings(|settings| settings.service_version = Some(version.to_owned()))
+        {
+            tracing::warn!("could not record the service version: {error}");
+        }
+    }
+
+    pub fn reapproval(&self) -> bool {
+        self.reapproval.load(Ordering::SeqCst)
+    }
+
+    pub fn register_service_recorded(&self, version: &str) {
+        self.record_service_version(version);
+        self.reapproval.store(false, Ordering::SeqCst);
+        *self
+            .service_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    pub fn repair_service(&self, version: &str) -> Result<ServiceStatus, String> {
+        if self.repairing.swap(true, Ordering::SeqCst) {
+            return Err("a repair is already running".to_owned());
+        }
+        let result = {
+            let _repairing = FlagGuard(&self.repairing);
+            service::reregister()
+        };
+        match &result {
+            Ok(service::Registration::Done) => self.register_service_recorded(version),
+            Ok(service::Registration::NeedsApproval) => {
+                self.reapproval.store(true, Ordering::SeqCst);
+                *self
+                    .service_error
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = None;
+            }
+            Err(message) => {
+                *self
+                    .service_error
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(message.clone());
+            }
+        }
+        result.map(|_| service::status())
     }
 
     pub fn mark_user_disconnect(&self, profile_id: &str) {
@@ -210,8 +295,67 @@ impl Ctx {
     pub fn availability_payload(&self) -> AvailabilityPayload {
         let availability = self.bridge.availability();
         let service = (availability == DaemonAvailability::Unreachable && service::applicable())
-            .then(service::status);
+            .then(|| self.service_status());
         AvailabilityPayload::new(self.bridge.socket(), &availability, service)
+    }
+}
+
+pub fn reconcile_service(app: &AppHandle) {
+    {
+        let ctx = app.state::<Ctx>();
+        let _hold = FlagGuard(&ctx.startup_hold);
+        reconcile_inner(app, &ctx);
+    }
+    check_auto_connect(app);
+}
+
+fn gather_evidence(ctx: &Ctx) -> (service::Evidence, bool) {
+    let bridge = ctx.bridge.clone();
+    let probe = match tauri::async_runtime::block_on(bridge.handshake_version(PROBE_WAIT)) {
+        Ok(version) => service::Probe::from_version(&version, wyvpn_ipc::VERSION),
+        Err(ClientError::Incompatible(_)) => service::Probe::Outdated,
+        Err(_) => service::Probe::Unreachable,
+    };
+    let (in_progress, loaded) = {
+        let model = ctx.model();
+        (model.session_in_progress(), model.statuses_loaded)
+    };
+    let evidence = service::Evidence {
+        job: service::job_state(),
+        probe,
+        session_active: service::session_may_be_active(in_progress, probe, loaded),
+    };
+    (evidence, probe != service::Probe::Unreachable && !loaded)
+}
+
+fn reconcile_inner(app: &AppHandle, ctx: &Ctx) {
+    if !service::applicable() {
+        return;
+    }
+    let version = app.package_info().version.to_string();
+    let stored = ctx.settings().service_version;
+    let status = service::status();
+    if !service::version_check_due(stored.as_deref(), &version, status) {
+        return;
+    }
+    let deadline = Instant::now() + DAEMON_GRACE;
+    let evidence = loop {
+        let (evidence, statuses_pending) = gather_evidence(ctx);
+        if (evidence.conclusive() && !statuses_pending) || Instant::now() >= deadline {
+            break evidence;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    match service::launch_action(stored.as_deref(), &version, status, evidence) {
+        LaunchAction::Nothing => {}
+        LaunchAction::RecordVersion => ctx.register_service_recorded(&version),
+        LaunchAction::Reregister => {
+            if let Err(error) = ctx.repair_service(&version) {
+                tracing::warn!("service re-registration failed: {error}");
+            }
+            let payload = ctx.refresh_service_state(app);
+            let _ = app.emit(AVAILABILITY_CHANNEL, &payload);
+        }
     }
 }
 
@@ -444,7 +588,10 @@ fn plan_notification(
 pub fn check_auto_connect(app: &AppHandle) {
     let ctx = app.state::<Ctx>();
     let settings = ctx.settings();
-    if !ctx.subscribed.load(Ordering::SeqCst) {
+    if !ctx.subscribed.load(Ordering::SeqCst)
+        || ctx.startup_hold.load(Ordering::SeqCst)
+        || ctx.repairing.load(Ordering::SeqCst)
+    {
         return;
     }
     let decision = {
@@ -639,6 +786,50 @@ pub fn probe(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flag_guard_clears_the_flag_even_when_the_holder_panics() {
+        let flag = AtomicBool::new(true);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = FlagGuard(&flag);
+            panic!("boom");
+        }));
+        assert!(result.is_err());
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn concurrent_setting_changes_keep_both_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Arc::new(Ctx::new(
+            Arc::new(Bridge::new(String::new())),
+            Some(dir.path().join("settings.json")),
+        ));
+        let writers: Vec<_> = (0..2)
+            .map(|which| {
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    for round in 0..50 {
+                        ctx.modify_settings(|settings| {
+                            if which == 0 {
+                                settings.service_version = Some(format!("v{round}"));
+                            } else {
+                                settings.notifications = round % 2 == 0;
+                            }
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let settings = ctx.settings();
+        assert_eq!(settings.service_version.as_deref(), Some("v49"));
+        assert!(!settings.notifications);
+        assert_eq!(Settings::load(&dir.path().join("settings.json")), settings);
+    }
 
     #[test]
     fn only_autostart_with_a_tray_starts_hidden() {

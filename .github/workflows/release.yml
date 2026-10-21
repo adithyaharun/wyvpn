@@ -136,6 +136,9 @@ jobs:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         run: ./scripts/windows-sign.ps1 -Phase post -Path target/packaging/dist
+      - name: Check wintun.dll in the MSI
+        shell: pwsh
+        run: ./scripts/check-windows-msi.ps1 -Path target/packaging/dist
       - name: Label unsigned
         shell: pwsh
         run: |

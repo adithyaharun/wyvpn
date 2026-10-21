@@ -265,14 +265,14 @@
             {:else}
               <h3 class="name">{profile.name}</h3>
             {/if}
-            <p class="meta">
+            <p class="meta selectable">
               {profile.user ? `${profile.user} on ${profile.server_host}` : profile.server_host}
             </p>
             {#if profile.transports.length > 0 || tunnelIp}
               <p class="transports">
                 <span>{profile.transports.map(transportLabel).join(", ")}</span>
                 {#if tunnelIp}
-                  <span class="tunnel"><span class="tunnel-label">Tunnel IP</span> <span class="num">{tunnelIp}</span></span>
+                  <span class="tunnel"><span class="tunnel-label">Tunnel IP</span> <span class="num selectable">{tunnelIp}</span></span>
                 {/if}
               </p>
             {/if}

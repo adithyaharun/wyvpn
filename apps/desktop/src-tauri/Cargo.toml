@@ -26,6 +26,7 @@ tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 getrandom = "0.3"
+semver = "1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -37,6 +38,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
@@ -46,3 +48,9 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libloading = "0.7"
+reqwest.workspace = true
+rustls.workspace = true
+rustls-platform-verifier.workspace = true
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+tauri-plugin-updater = "2"

@@ -37,6 +37,11 @@
     "allow-third-party-licenses",
     "allow-openvpn-notice",
     "allow-window-chrome",
+    "allow-update-state",
+    "allow-check-for-updates",
+    "allow-install-update",
+    "allow-dismiss-update",
+    "allow-open-update-page",
     "clipboard-manager:allow-write-text"
   ]
 }

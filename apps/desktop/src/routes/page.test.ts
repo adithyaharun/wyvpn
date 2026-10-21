@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { StartupNotice } from "$lib/types";
+import type { ConnectionStatus, StartupNotice, UpdateState } from "$lib/types";
+import { updates } from "$lib/update.svelte";
 
 const invoke = vi.hoisted(() => vi.fn());
 const handlers = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
@@ -27,7 +28,7 @@ function backend(stored: StartupNotice | null, available = true) {
       case "take_startup_notice":
         return stored;
       case "get_settings":
-        return { auto_connect_profile_id: "gone", auto_reconnect: false, notifications: false };
+        return { auto_connect_profile_id: "gone", auto_reconnect: false, notifications: false, check_updates: true };
       case "get_launch_at_login":
         return false;
       case "notification_permission":
@@ -141,5 +142,139 @@ describe("toolbar", () => {
     expect(screen.queryByRole("navigation")).toBeNull();
     expect(screen.getAllByRole("button", { name: "Connection log" })).toHaveLength(1);
     expect(screen.getAllByRole("button", { name: "Settings" })).toHaveLength(1);
+  });
+});
+
+describe("updates", () => {
+  const offer: UpdateState = {
+    state: "available",
+    version: "0.3.0",
+    notes: "Fixes",
+    date: null,
+    installable: true,
+    release_url: "https://github.com/adithyaharun/wyvpn/releases/tag/v0.3.0",
+  };
+
+  const connected: ConnectionStatus = {
+    profile_id: "p1",
+    profile_name: "Office",
+    state: "connected",
+    transport: "open_vpn",
+    tunnel_ip: "10.0.0.2",
+    server_endpoint: "vpn.example.com:443",
+    connected_since: 1,
+    rx_bytes: 0,
+    tx_bytes: 0,
+  };
+
+  function updateBackend(state: UpdateState, statuses: ConnectionStatus[] = []) {
+    invoke.mockImplementation(async (command: string) => {
+      switch (command) {
+        case "daemon_state":
+          return { available: true, socket: "/tmp/w.sock" };
+        case "list_profiles":
+          return [];
+        case "status":
+          return statuses;
+        case "update_state":
+          return state;
+        case "dismiss_update":
+          return { ...offer, state: "dismissed" };
+        default:
+          return null;
+      }
+    });
+  }
+
+  function emit(name: string, payload: unknown) {
+    const handler = handlers.get(name);
+    if (!handler) throw new Error(`no listener for ${name}`);
+    handler({ payload });
+  }
+
+  async function ready() {
+    render(Page);
+    await vi.waitFor(() => expect(handlers.has("app://update-prompt")).toBe(true));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("update_state", undefined));
+  }
+
+  beforeEach(() => {
+    handlers.clear();
+    invoke.mockReset();
+    updates.state = { state: "idle" };
+    updates.open = false;
+    updates.error = null;
+  });
+
+  it("opens the update sheet for an available prompt", async () => {
+    updateBackend({ ...offer, version: "0.2.9", state: "dismissed" });
+    await ready();
+    expect(screen.queryByRole("dialog", { name: "Software update" })).toBeNull();
+
+    emit("app://update-prompt", { outcome: "available" });
+    expect(await screen.findByRole("dialog", { name: "Software update" })).toBeInTheDocument();
+    expect(screen.getByText("WyVPN 0.2.9 is available")).toBeInTheDocument();
+  });
+
+  it("shows that WyVPN is up to date after a menu check", async () => {
+    updateBackend({ state: "idle" });
+    await ready();
+    emit("app://update", { state: "up_to_date" });
+    emit("app://update-prompt", { outcome: "up_to_date" });
+    expect(await screen.findByText("WyVPN is up to date")).toBeInTheDocument();
+  });
+
+  it("shows the error after a failed menu check", async () => {
+    updateBackend({ state: "idle" });
+    await ready();
+    emit("app://update", { state: "failed", message: "Could not reach the update server." });
+    emit("app://update-prompt", { outcome: "failed" });
+    const dialog = await screen.findByRole("dialog", { name: "Software update" });
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("Could not reach the update server.");
+    expect(within(dialog).getByRole("button", { name: "Check again" })).toBeInTheDocument();
+  });
+
+  it("opens for an update found while the window was hidden and Later closes it", async () => {
+    updateBackend(offer);
+    await ready();
+    const dialog = await screen.findByRole("dialog", { name: "Software update" });
+    expect(within(dialog).queryByRole("note")).toBeNull();
+
+    await fireEvent.click(within(dialog).getByRole("button", { name: "Later" }));
+    expect(invoke).toHaveBeenCalledWith("dismiss_update", undefined);
+    await vi.waitFor(() => expect(screen.queryByRole("dialog", { name: "Software update" })).toBeNull());
+  });
+
+  it("keeps focus in the sheet during an install and returns it on close", async () => {
+    updateBackend({ ...offer, version: "0.2.9", state: "dismissed" });
+    await ready();
+    const trigger = screen.getByRole("button", { name: "Settings" });
+    trigger.focus();
+
+    emit("app://update-prompt", { outcome: "available" });
+    const dialog = await screen.findByRole("dialog", { name: "Software update" });
+    const install = within(dialog).getByRole("button", { name: "Install" });
+    install.focus();
+    await fireEvent.click(install);
+    expect(invoke).toHaveBeenCalledWith("install_update", undefined);
+    emit("app://update", { state: "disconnecting", version: "0.3.0" });
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(dialog).getByRole("status")));
+
+    emit("app://update", { state: "failed", message: "The update could not be downloaded. Nothing was installed." });
+    await within(dialog).findByRole("button", { name: "Check again" });
+    const close = within(dialog).getByRole("button", { name: "Close" });
+    expect(close).toBeEnabled();
+    await fireEvent.click(close);
+    await vi.waitFor(() => expect(screen.queryByRole("dialog", { name: "Software update" })).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("warns about the active VPN session", async () => {
+    updateBackend({ ...offer, version: "0.3.1" }, [connected]);
+    await ready();
+    const dialog = await screen.findByRole("dialog", { name: "Software update" });
+    await vi.waitFor(() =>
+      expect(within(dialog).getByRole("note")).toHaveTextContent("Installing disconnects the VPN."),
+    );
   });
 });

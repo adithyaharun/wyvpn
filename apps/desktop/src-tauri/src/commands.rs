@@ -20,6 +20,7 @@ use crate::model::AvailabilityPayload;
 use crate::service::{self, ServiceStatus};
 use crate::settings::Settings;
 use crate::shell::{self, Ctx, StartupNotice};
+use crate::updater::{self, UpdateState};
 
 type CmdResult<T> = Result<T, CmdError>;
 
@@ -128,6 +129,9 @@ pub async fn connect(
     profile_id: String,
     transport: Option<Transport>,
 ) -> CmdResult<Value> {
+    if ctx.model().updating {
+        return Err(CmdError::invalid_request("an update is being installed"));
+    }
     ctx.bridge
         .ok(ctx.settings().connect_request(profile_id, transport))
         .await?;
@@ -258,7 +262,8 @@ pub fn open_support(app: AppHandle, target: String) -> CmdResult<Value> {
 }
 
 #[tauri::command]
-pub fn service_status(ctx: State<'_, Ctx>, app: AppHandle) -> Option<ServiceStatus> {
+pub async fn service_status(app: AppHandle) -> Option<ServiceStatus> {
+    let ctx = app.state::<Ctx>();
     let status = service::applicable().then(|| ctx.service_status());
     ctx.refresh_service_state(&app);
     status
@@ -353,4 +358,31 @@ pub fn openvpn_notice(app: AppHandle) -> OpenVpnNotice {
         std::env::consts::OS,
         &app.package_info().version.to_string(),
     )
+}
+
+#[tauri::command]
+pub async fn update_state(app: AppHandle) -> UpdateState {
+    updater::current_state(&app)
+}
+
+#[tauri::command]
+pub async fn check_for_updates(app: AppHandle) -> CmdResult<UpdateState> {
+    updater::check(&app, true).await
+}
+
+#[tauri::command]
+pub async fn install_update(app: AppHandle) -> CmdResult<Value> {
+    updater::install(&app)?;
+    Ok(Value::Null)
+}
+
+#[tauri::command]
+pub async fn dismiss_update(app: AppHandle) -> CmdResult<UpdateState> {
+    updater::dismiss(&app)
+}
+
+#[tauri::command]
+pub async fn open_update_page(app: AppHandle) -> CmdResult<Value> {
+    updater::open_page(&app)?;
+    Ok(Value::Null)
 }

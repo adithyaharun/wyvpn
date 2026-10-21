@@ -69,7 +69,7 @@
     <span class="end">This device</span>
     <span class="wire" aria-hidden="true"><span class="dot"></span><span class="line"></span><span class="dot"></span></span>
     <span class="end end-remote">
-      <span class="num" title={endpoint}>{endpoint}</span>
+      <span class="num selectable" title={endpoint}>{endpoint}</span>
       <span class="slot" class:empty={!session?.server_endpoint} aria-hidden={!session?.server_endpoint}>
         <CopyButton value={session?.server_endpoint ?? ""} label="Copy endpoint" disabled={!session?.server_endpoint} />
       </span>
@@ -80,7 +80,7 @@
     <div>
       <dt>Tunnel IP</dt>
       <dd>
-        <span class="num">{tunnelIp ?? "—"}</span>
+        <span class="num selectable">{tunnelIp ?? "—"}</span>
         <span class="slot" class:empty={!tunnelIp} aria-hidden={!tunnelIp}>
           <CopyButton value={tunnelIp ?? ""} label="Copy tunnel IP" disabled={!tunnelIp} />
         </span>
@@ -90,7 +90,7 @@
       <div>
         <dt>Local IP</dt>
         <dd>
-          <span class="num">{localIp}</span>
+          <span class="num selectable">{localIp}</span>
           <CopyButton value={localIp} label="Copy local IP" />
         </dd>
       </div>

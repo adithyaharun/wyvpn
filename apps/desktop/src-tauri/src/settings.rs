@@ -11,6 +11,7 @@ pub struct Settings {
     pub auto_connect_profile_id: Option<String>,
     pub auto_reconnect: bool,
     pub notifications: bool,
+    pub check_updates: bool,
     pub service_version: Option<String>,
 }
 
@@ -20,6 +21,7 @@ impl Default for Settings {
             auto_connect_profile_id: None,
             auto_reconnect: true,
             notifications: true,
+            check_updates: true,
             service_version: None,
         }
     }
@@ -69,6 +71,33 @@ impl Settings {
     }
 }
 
+const SHOW_AFTER_UPDATE_FILE: &str = "show-after-update";
+
+fn show_after_update_path(settings_path: &Path) -> std::path::PathBuf {
+    settings_path.with_file_name(SHOW_AFTER_UPDATE_FILE)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+pub fn mark_show_after_update(settings_path: &Path, target_version: &str) -> io::Result<()> {
+    let path = show_after_update_path(settings_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_durably(&path, target_version.trim_start_matches('v').as_bytes())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+pub fn clear_show_after_update(settings_path: &Path) {
+    let _ = fs::remove_file(show_after_update_path(settings_path));
+}
+
+pub fn take_show_after_update(settings_path: &Path, running_version: &str) -> bool {
+    let path = show_after_update_path(settings_path);
+    let target = fs::read_to_string(&path).ok();
+    let _ = fs::remove_file(&path);
+    target.is_some_and(|target| target.trim() == running_version.trim_start_matches('v'))
+}
+
 fn write_durably(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = fs::File::create(path)?;
     file.write_all(bytes)?;
@@ -86,6 +115,7 @@ mod tests {
         assert_eq!(settings, Settings::default());
         assert_eq!(settings.auto_connect_profile_id, None);
         assert!(settings.auto_reconnect && settings.notifications);
+        assert!(settings.check_updates);
     }
 
     #[test]
@@ -115,6 +145,7 @@ mod tests {
             auto_connect_profile_id: Some("p1".into()),
             auto_reconnect: false,
             notifications: false,
+            check_updates: false,
             service_version: Some("0.1.0".into()),
         };
         settings.save(&path).unwrap();
@@ -156,6 +187,33 @@ mod tests {
     }
 
     #[test]
+    fn files_without_check_updates_default_it_on_and_keep_other_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            b"{\"auto_reconnect\": false, \"notifications\": false, \"service_version\": \"0.1.0\"}",
+        )
+        .unwrap();
+        let settings = Settings::load(&path);
+        assert!(settings.check_updates);
+        assert!(!settings.auto_reconnect && !settings.notifications);
+        assert_eq!(settings.service_version.as_deref(), Some("0.1.0"));
+    }
+
+    #[test]
+    fn check_updates_off_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let off = Settings {
+            check_updates: false,
+            ..Settings::default()
+        };
+        off.save(&path).unwrap();
+        assert!(!Settings::load(&path).check_updates);
+    }
+
+    #[test]
     fn frontend_updates_cannot_change_the_service_version() {
         let current = Settings {
             service_version: Some("0.2.0".into()),
@@ -169,6 +227,30 @@ mod tests {
         let merged = incoming.keeping_service_version(&current);
         assert_eq!(merged.service_version.as_deref(), Some("0.2.0"));
         assert!(!merged.notifications);
+    }
+
+    #[test]
+    fn show_after_update_marker_is_one_shot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("settings.json");
+        assert!(!take_show_after_update(&path, "0.2.0"));
+        mark_show_after_update(&path, "0.2.0").unwrap();
+        assert!(take_show_after_update(&path, "0.2.0"));
+        assert!(!take_show_after_update(&path, "0.2.0"));
+        mark_show_after_update(&path, "v0.2.0").unwrap();
+        assert!(take_show_after_update(&path, "0.2.0"));
+        mark_show_after_update(&path, "0.2.0").unwrap();
+        clear_show_after_update(&path);
+        assert!(!take_show_after_update(&path, "0.2.0"));
+    }
+
+    #[test]
+    fn show_after_update_marker_is_ignored_and_removed_when_the_version_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        mark_show_after_update(&path, "0.2.0").unwrap();
+        assert!(!take_show_after_update(&path, "0.1.2"));
+        assert!(!take_show_after_update(&path, "0.2.0"));
     }
 
     #[test]

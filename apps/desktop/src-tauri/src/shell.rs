@@ -16,12 +16,16 @@ use crate::bridge::{Bridge, BridgeMsg, DaemonAvailability, EventConfig};
 use crate::chrome;
 use crate::client::ClientError;
 use crate::error::sanitize;
-use crate::model::{APPROVE_SERVICE, AvailabilityPayload, COPY_TUNNEL_IP, DaemonStatus, Model};
+use crate::model::{
+    APPROVE_SERVICE, AvailabilityPayload, CHECK_UPDATES, COPY_TUNNEL_IP, DaemonStatus,
+    INSTALL_UPDATE, Model,
+};
 use crate::notifications::{self, Kind, Notification};
 use crate::retry::RetryStore;
 use crate::service::{self, LaunchAction, ServiceStatus};
 use crate::settings::Settings;
 use crate::tray::{self, Rendered};
+use crate::updater::Updater;
 
 pub const MAIN_WINDOW: &str = "main";
 pub const EVENT_CHANNEL: &str = "daemon://event";
@@ -55,6 +59,7 @@ pub struct Ctx {
     pub rendered: Rendered,
     pub tray_ok: AtomicBool,
     pub retry: RetryStore,
+    pub updater: Updater<crate::updater::Pending>,
     settings: Mutex<Settings>,
     settings_path: Option<PathBuf>,
     user_disconnects: Mutex<HashMap<String, Instant>>,
@@ -84,6 +89,7 @@ impl Ctx {
             rendered: Rendered::default(),
             tray_ok: AtomicBool::new(false),
             retry: RetryStore::default(),
+            updater: Updater::default(),
             settings: Mutex::new(settings),
             settings_path,
             user_disconnects: Mutex::default(),
@@ -120,6 +126,28 @@ impl Ctx {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub fn mark_show_after_update(&self, target_version: &str) {
+        if let Some(path) = &self.settings_path
+            && let Err(error) = crate::settings::mark_show_after_update(path, target_version)
+        {
+            tracing::warn!("could not record the update relaunch: {error}");
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub fn clear_show_after_update(&self) {
+        if let Some(path) = &self.settings_path {
+            crate::settings::clear_show_after_update(path);
+        }
+    }
+
+    pub fn take_show_after_update(&self, running_version: &str) -> bool {
+        self.settings_path
+            .as_deref()
+            .is_some_and(|path| crate::settings::take_show_after_update(path, running_version))
     }
 
     pub fn modify_settings(&self, change: impl FnOnce(&mut Settings)) -> std::io::Result<Settings> {
@@ -411,6 +439,8 @@ pub fn on_menu(app: &AppHandle, id: &str) {
             service::open_login_items();
             show_main(app);
         }
+        CHECK_UPDATES => crate::updater::check_from_menu(app),
+        INSTALL_UPDATE => crate::updater::install_from_menu(app),
         COPY_TUNNEL_IP => {
             let ip = app.state::<Ctx>().model().connected_tunnel_ip();
             if let Some(ip) = ip
@@ -422,10 +452,13 @@ pub fn on_menu(app: &AppHandle, id: &str) {
         _ => {
             let (action, profile_id) = id.split_once(':').unwrap_or((id, ""));
             let request = match action {
-                "connect" => app
-                    .state::<Ctx>()
-                    .settings()
-                    .connect_request(profile_id.to_owned(), None),
+                "connect" => {
+                    let ctx = app.state::<Ctx>();
+                    if ctx.model().updating {
+                        return;
+                    }
+                    ctx.settings().connect_request(profile_id.to_owned(), None)
+                }
                 "disconnect" => {
                     app.state::<Ctx>().mark_user_disconnect(profile_id);
                     Request::Disconnect {
@@ -522,13 +555,13 @@ pub fn start_visible(tray_ok: bool, autostarted: bool, approval_pending: bool) -
     !tray_ok || !autostarted || approval_pending
 }
 
-fn window_visible(app: &AppHandle) -> bool {
+pub fn window_visible(app: &AppHandle) -> bool {
     app.get_webview_window(MAIN_WINDOW)
         .and_then(|window| window.is_visible().ok())
         .unwrap_or(false)
 }
 
-fn notify(app: &AppHandle, note: &Notification) {
+pub fn notify(app: &AppHandle, note: &Notification) {
     if let Err(error) = app
         .notification()
         .builder()
@@ -591,6 +624,7 @@ pub fn check_auto_connect(app: &AppHandle) {
     if !ctx.subscribed.load(Ordering::SeqCst)
         || ctx.startup_hold.load(Ordering::SeqCst)
         || ctx.repairing.load(Ordering::SeqCst)
+        || ctx.model().updating
     {
         return;
     }

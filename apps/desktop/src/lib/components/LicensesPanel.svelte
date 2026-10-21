@@ -29,7 +29,7 @@
 <Sheet title="Third-party licenses" size="full" {onclose}>
   <div class="panel">
     {#if notice}
-      <p class="openvpn">
+      <p class="openvpn selectable">
         {#if notice.source_url}
           OpenVPN is licensed under {notice.license}. Source:
           <button class="link" type="button" onclick={() => api.openSupport("openvpn_source")}>
@@ -44,7 +44,7 @@
       <p class="alert" role="alert">The license text couldn't be loaded.</p>
     {:else}
       <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-      <div class="scroller" role="region" aria-label="License text" tabindex="0">
+      <div class="scroller selectable" role="region" aria-label="License text" tabindex="0">
         <pre>{text ?? "Loading…"}</pre>
       </div>
     {/if}
@@ -84,7 +84,6 @@
     border: 1px solid var(--line);
     border-radius: 6px;
     background: var(--paper);
-    user-select: text;
   }
 
   .scroller:focus-visible {

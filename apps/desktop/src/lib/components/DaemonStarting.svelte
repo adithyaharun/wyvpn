@@ -81,7 +81,7 @@
     {#if socket}
       <p class="socket">
         <span class="socket-label">Looking for</span>
-        <span class="socket-path">{socket}</span>
+        <span class="socket-path selectable">{socket}</span>
       </p>
     {/if}
     {#if shownError}
@@ -141,7 +141,6 @@
   .socket-path {
     color: var(--ink);
     overflow-wrap: anywhere;
-    user-select: text;
   }
 
   .alert {

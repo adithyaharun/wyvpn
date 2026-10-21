@@ -58,7 +58,7 @@
       <div class="frame">
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
         <div
-          class="scroller"
+          class="scroller selectable"
           role="region"
           aria-label="Log lines"
           tabindex="0"
@@ -123,7 +123,6 @@
     border: 1px solid var(--line);
     border-radius: 6px;
     background: var(--paper);
-    user-select: text;
   }
 
   .scroller:focus-visible {

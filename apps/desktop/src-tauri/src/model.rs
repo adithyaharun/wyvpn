@@ -6,9 +6,12 @@ use crate::bridge::{BridgeMsg, DaemonAvailability};
 use crate::client::Mismatch;
 use crate::error::sanitize;
 use crate::service::ServiceStatus;
+use crate::updater::UpdateState;
 
 pub const COPY_TUNNEL_IP: &str = "copy_tunnel_ip";
 pub const APPROVE_SERVICE: &str = "approve_service";
+pub const INSTALL_UPDATE: &str = "install_update";
+pub const CHECK_UPDATES: &str = "check_updates";
 const MENU_NAME_CHARS: usize = 40;
 
 #[derive(Debug, Default, Clone)]
@@ -20,6 +23,15 @@ pub struct Model {
     pub statuses_loaded: bool,
     pub daemon_status: DaemonStatus,
     pub setup: Option<ServiceStatus>,
+    pub update: Option<UpdateEntry>,
+    pub update_busy: bool,
+    pub updating: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateEntry {
+    pub version: String,
+    pub installable: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -108,6 +120,18 @@ impl Model {
         changed
     }
 
+    pub fn set_update(&mut self, state: &UpdateState) {
+        self.updating = state.installing();
+        self.update_busy = state.busy();
+        if matches!(state, UpdateState::Checking) {
+            return;
+        }
+        self.update = state.offer().map(|offer| UpdateEntry {
+            version: offer.version.clone(),
+            installable: offer.installable,
+        });
+    }
+
     pub fn apply(&mut self, msg: &BridgeMsg) {
         match msg {
             BridgeMsg::Subscribed => {}
@@ -170,6 +194,11 @@ impl Model {
 
     pub fn session_in_progress(&self) -> bool {
         self.active().is_some() || self.statuses.iter().any(|status| status.awaiting.is_some())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    pub fn active_profile_ids(&self) -> Vec<String> {
+        active_ids(&self.statuses)
     }
 
     pub fn tunnel_ip(&self, profile_id: &str) -> Option<String> {
@@ -299,9 +328,11 @@ impl Model {
             let name = self.display_name(&profile.id);
             let state = self.state_of(&profile.id);
             let (verb, id_prefix, enabled) = match state {
-                ConnectionState::Disconnected | ConnectionState::Error => {
-                    ("Connect", "connect", self.available && busy.is_none())
-                }
+                ConnectionState::Disconnected | ConnectionState::Error => (
+                    "Connect",
+                    "connect",
+                    self.available && busy.is_none() && !self.updating,
+                ),
                 ConnectionState::Disconnecting => ("Disconnect", "disconnect", false),
                 _ => ("Disconnect", "disconnect", self.available),
             };
@@ -314,6 +345,23 @@ impl Model {
         if !self.profiles.is_empty() {
             entries.push(Entry::Separator);
         }
+        if let Some(update) = &self.update {
+            let version = menu_label(&update.version);
+            entries.push(Entry::Action {
+                id: INSTALL_UPDATE.to_owned(),
+                label: if update.installable {
+                    format!("Update to {version}…")
+                } else {
+                    format!("Version {version} available…")
+                },
+                enabled: !self.update_busy,
+            });
+        }
+        entries.push(Entry::Action {
+            id: CHECK_UPDATES.to_owned(),
+            label: "Check for Updates…".to_owned(),
+            enabled: !self.update_busy,
+        });
         entries.push(Entry::Action {
             id: "open".to_owned(),
             label: "Open WyVPN".to_owned(),
@@ -326,6 +374,21 @@ impl Model {
         });
         entries
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+pub fn active_ids(statuses: &[ConnectionStatus]) -> Vec<String> {
+    statuses
+        .iter()
+        .filter(|status| {
+            status.awaiting.is_some()
+                || !matches!(
+                    status.state,
+                    ConnectionState::Disconnected | ConnectionState::Error
+                )
+        })
+        .map(|status| status.profile_id.clone())
+        .collect()
 }
 
 fn menu_label(text: &str) -> String {
@@ -465,6 +528,7 @@ mod tests {
             vec![
                 ("Connect Office".into(), true),
                 ("Connect Labx".into(), true),
+                ("Check for Updates…".into(), true),
                 ("Open WyVPN".into(), true),
                 ("Quit".into(), true),
             ]
@@ -528,6 +592,129 @@ mod tests {
         ));
         assert_eq!(model.icon_state(), IconState::Disconnected);
         assert_eq!(labels(&model)[0], ("Connect Office".into(), true));
+    }
+
+    fn offer(installable: bool) -> UpdateState {
+        UpdateState::Available(crate::updater::Offer::new(
+            crate::updater::Found {
+                version: "0.2.0".into(),
+                notes: None,
+                date: None,
+            },
+            installable,
+        ))
+    }
+
+    fn update_labels(model: &Model) -> Vec<(String, bool)> {
+        labels(model)
+            .into_iter()
+            .filter(|(label, _)| label.contains("pdate") || label.contains("available"))
+            .collect()
+    }
+
+    #[test]
+    fn no_update_entry_without_an_update() {
+        let mut model = model();
+        assert_eq!(
+            update_labels(&model),
+            vec![("Check for Updates…".into(), true)]
+        );
+        model.set_update(&UpdateState::UpToDate);
+        assert_eq!(update_labels(&model).len(), 1);
+    }
+
+    #[test]
+    fn installable_update_is_offered_as_an_update() {
+        let mut model = model();
+        model.set_update(&offer(true));
+        assert_eq!(
+            update_labels(&model),
+            vec![
+                ("Update to 0.2.0…".into(), true),
+                ("Check for Updates…".into(), true)
+            ]
+        );
+    }
+
+    #[test]
+    fn notify_only_update_is_offered_as_a_version() {
+        let mut model = model();
+        model.set_update(&offer(false));
+        assert_eq!(
+            update_labels(&model)[0],
+            ("Version 0.2.0 available…".into(), true)
+        );
+    }
+
+    #[test]
+    fn update_entries_are_disabled_while_busy() {
+        let mut model = model();
+        model.set_update(&offer(true));
+        model.set_update(&UpdateState::Checking);
+        assert_eq!(
+            update_labels(&model),
+            vec![
+                ("Update to 0.2.0…".into(), false),
+                ("Check for Updates…".into(), false)
+            ]
+        );
+        model.set_update(&UpdateState::Installing {
+            version: "0.2.0".into(),
+        });
+        assert_eq!(
+            update_labels(&model),
+            vec![("Check for Updates…".into(), false)]
+        );
+    }
+
+    #[test]
+    fn connect_entries_are_disabled_while_updating() {
+        let mut model = model();
+        model.set_update(&UpdateState::Disconnecting {
+            version: "0.2.0".into(),
+        });
+        assert!(model.updating);
+        let labels = labels(&model);
+        assert_eq!(labels[0], ("Connect Office".into(), false));
+        assert_eq!(labels[1], ("Connect Labx".into(), false));
+    }
+
+    #[test]
+    fn updating_is_cleared_after_a_failure() {
+        let mut model = model();
+        model.set_update(&UpdateState::Downloading {
+            version: "0.2.0".into(),
+            received: 0,
+            total: None,
+        });
+        assert!(model.updating && model.update_busy);
+        model.set_update(&UpdateState::Failed {
+            message: "x".into(),
+        });
+        assert!(!model.updating && !model.update_busy);
+        assert_eq!(model.update, None);
+        assert_eq!(labels(&model)[0], ("Connect Office".into(), true));
+    }
+
+    #[test]
+    fn active_profiles_include_connecting_connected_and_awaiting() {
+        let mut model = model();
+        assert!(model.active_profile_ids().is_empty());
+        model.apply(&BridgeMsg::Statuses(vec![
+            ConnectionStatus {
+                state: ConnectionState::Connected,
+                ..ConnectionStatus::disconnected("a")
+            },
+            ConnectionStatus {
+                awaiting: Some(AuthMode::Pin),
+                ..ConnectionStatus::disconnected("b")
+            },
+            ConnectionStatus {
+                state: ConnectionState::Error,
+                ..ConnectionStatus::disconnected("c")
+            },
+        ]));
+        assert_eq!(model.active_profile_ids(), vec!["a", "b"]);
     }
 
     #[test]

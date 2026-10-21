@@ -10,9 +10,9 @@
     <ShieldAlert class="glyph" size={16} strokeWidth={2} aria-hidden="true" />
     Join the wyvpn group
   </h1>
-  <p>Your account isn't allowed to use the WyVPN service. Add yourself to the <span class="cmd">wyvpn</span> group:</p>
+  <p>Your account isn't allowed to use the WyVPN service. Add yourself to the <span class="cmd selectable">wyvpn</span> group:</p>
   <div class="command">
-    <code>{command}</code>
+    <code class="selectable">{command}</code>
     <CopyButton value={command} label="Copy command" />
   </div>
   <p>Then log out and back in. This window reconnects on its own afterwards.</p>
@@ -62,6 +62,5 @@
   code {
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     font-size: 12px;
-    user-select: text;
   }
 </style>

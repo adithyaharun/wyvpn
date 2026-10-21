@@ -16,8 +16,10 @@
   import SettingsSheet from "$lib/components/SettingsSheet.svelte";
   import StatusPanel from "$lib/components/StatusPanel.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
-  import { daemon } from "$lib/daemon.svelte";
+  import UpdateSheet from "$lib/components/UpdateSheet.svelte";
+  import { daemon, isActive } from "$lib/daemon.svelte";
   import { describeError } from "$lib/errors";
+  import { updates } from "$lib/update.svelte";
   import { watchWindowChrome } from "$lib/window";
 
   type Panel = "import" | "settings" | "log" | "licenses";
@@ -26,6 +28,9 @@
   const session = $derived(daemon.session);
   const sessionProfile = $derived(daemon.profiles.find((p) => p.id === session?.profile_id));
   const pending = $derived(daemon.pendingCredentials);
+  const vpnActive = $derived(
+    pending !== null || Object.values(daemon.statuses).some((s) => isActive(s.state) || s.awaiting),
+  );
   const pendingName = $derived(
     pending ? (daemon.profiles.find((p) => p.id === pending.profileId)?.name ?? "") : "",
   );
@@ -36,6 +41,7 @@
 
   onMount(() => {
     const stop = daemon.start();
+    const stopUpdates = updates.start();
     const stopChrome = watchWindowChrome();
     let unlisten: UnlistenFn | undefined;
     let disposed = false;
@@ -47,12 +53,13 @@
       disposed = true;
       unlisten?.();
       stopChrome();
+      stopUpdates();
       stop();
     };
   });
 </script>
 
-<div class="app" inert={panel !== null || pending !== null}>
+<div class="app" inert={panel !== null || pending !== null || updates.open}>
   <Toolbar
     available={daemon.available}
     onimport={() => (panel = "import")}
@@ -82,7 +89,7 @@
 
   {#if daemon.lastError}
     <div class="error" role="alert">
-      <p>{describeError(daemon.lastError)}</p>
+      <p class="selectable">{describeError(daemon.lastError)}</p>
       <button class="btn btn-text" type="button" onclick={() => daemon.dismissError()}>Dismiss</button>
     </div>
   {/if}
@@ -114,6 +121,10 @@
   <LogPanel onclose={() => (panel = null)} />
 {:else if panel === "licenses"}
   <LicensesPanel onclose={() => (panel = null)} />
+{/if}
+
+{#if updates.open}
+  <UpdateSheet {vpnActive} />
 {/if}
 
 {#if pending}

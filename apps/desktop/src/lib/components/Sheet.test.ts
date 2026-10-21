@@ -27,3 +27,21 @@ describe("Sheet backdrop", () => {
     expect(scrim(container)).toHaveAttribute("data-tauri-drag-region");
   });
 });
+
+describe("Sheet closable", () => {
+  it("ignores the close button, Escape and the backdrop when it cannot close", async () => {
+    const onclose = vi.fn();
+    const { container, getByRole } = render(Sheet, { title: "Test", closable: false, onclose, children });
+    expect(getByRole("button", { name: "Close" })).toBeDisabled();
+    await fireEvent.keyDown(window, { key: "Escape" });
+    await fireEvent.click(scrim(container));
+    expect(onclose).not.toHaveBeenCalled();
+  });
+
+  it("closes on Escape by default", async () => {
+    const onclose = vi.fn();
+    render(Sheet, { title: "Test", onclose, children });
+    await fireEvent.keyDown(window, { key: "Escape" });
+    expect(onclose).toHaveBeenCalledOnce();
+  });
+});

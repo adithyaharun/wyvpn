@@ -13,6 +13,7 @@ pub enum Kind {
     PinNeeded,
     MissingDefault,
     ApprovalNeeded,
+    UpdateAvailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +54,14 @@ impl Notification {
             Kind::MissingDefault,
             "Auto-connect skipped",
             "The default profile no longer exists".to_owned(),
+        )
+    }
+
+    pub fn update_available(version: &str) -> Self {
+        Self::new(
+            Kind::UpdateAvailable,
+            "Update available",
+            format!("WyVPN {} is available", sanitize(version)),
         )
     }
 

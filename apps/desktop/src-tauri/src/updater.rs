@@ -372,11 +372,11 @@ fn describe(error: &tauri_plugin_updater::Error, phase: Phase) -> String {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const DOWNLOAD_STALL: std::time::Duration = std::time::Duration::from_secs(60);
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const STALL_POLL: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]

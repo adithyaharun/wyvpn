@@ -7,6 +7,7 @@ use tokio::time::{Instant, sleep, timeout_at};
 use crate::error::CmdError;
 
 pub const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub const DISCONNECT_POLL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

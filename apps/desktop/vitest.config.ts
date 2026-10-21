@@ -8,5 +8,6 @@ export default defineConfig({
     environment: "jsdom",
     include: ["src/**/*.test.ts"],
     setupFiles: ["./src/test-setup.ts"],
+    css: { include: [/(ProfileList|StatusPanel)\.svelte/] },
   },
 });

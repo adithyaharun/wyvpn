@@ -668,7 +668,7 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = bridge.ok(settings.connect_request("p1".into())).await;
+        let _ = bridge.ok(settings.connect_request("p1".into(), None)).await;
         assert!(matches!(
             log.lock().unwrap()[0],
             Request::Connect {
@@ -676,6 +676,33 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn connect_requests_pass_the_chosen_transport_through() {
+        let (_dir, path) = socket();
+        let (_server, log) = fake(&path, false);
+        let bridge = Bridge::new(path.to_string_lossy().into_owned()).trusting_any_peer();
+        let settings = crate::settings::Settings::default();
+
+        for transport in [Some(Transport::WireGuard), Some(Transport::OpenVpn), None] {
+            let _ = bridge
+                .ok(settings.connect_request("p1".into(), transport))
+                .await;
+        }
+        let sent: Vec<_> = log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| match request {
+                Request::Connect { transport, .. } => *transport,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            sent,
+            [Some(Transport::WireGuard), Some(Transport::OpenVpn), None]
+        );
     }
 
     #[tokio::test]

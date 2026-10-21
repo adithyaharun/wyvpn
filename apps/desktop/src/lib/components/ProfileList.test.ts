@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/svelte";
-import { describe, expect, it, vi } from "vitest";
-import type { ConnectionStatus, ProfileSummary } from "$lib/types";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ConnectionStatus, ProfileSummary, Transport } from "$lib/types";
 import ProfileList from "./ProfileList.svelte";
 import StatusPanel from "./StatusPanel.svelte";
 
@@ -269,5 +269,278 @@ describe("ProfileList", () => {
     );
     expect(screen.getByText("10.0.0.2")).toBeInTheDocument();
     expect(screen.queryByText("10.9.9.9")).toBeNull();
+  });
+
+  describe("transport picker", () => {
+    function only(...transports: Transport[]) {
+      return { ...profile("p1", "Office"), transports };
+    }
+
+    const toggle = () => screen.getByRole("button", { name: "Choose transport" });
+
+    it("shows a plain Connect button for an OpenVPN-only profile", async () => {
+      const onconnect = vi.fn();
+      render(ProfileList, props({ profiles: [only("open_vpn")], onconnect }));
+      expect(screen.queryByRole("button", { name: "Choose transport" })).toBeNull();
+      await fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      expect(onconnect).toHaveBeenCalledWith("p1", "open_vpn");
+    });
+
+    it("connects a WireGuard-only profile with WireGuard", async () => {
+      const onconnect = vi.fn();
+      render(ProfileList, props({ profiles: [only("wire_guard")], onconnect }));
+      expect(screen.queryByRole("button", { name: "Choose transport" })).toBeNull();
+      await fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      expect(onconnect).toHaveBeenCalledWith("p1", "wire_guard");
+    });
+
+    it("leaves the transport to the daemon when the profile lists none", async () => {
+      const onconnect = vi.fn();
+      render(ProfileList, props({ profiles: [only()], onconnect }));
+      await fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      expect(onconnect).toHaveBeenCalledWith("p1", undefined);
+    });
+
+    it("connects with OpenVPN by default when WireGuard is also offered", async () => {
+      const onconnect = vi.fn();
+      render(ProfileList, props({ profiles: [only("wire_guard", "open_vpn")], onconnect }));
+      expect(toggle()).toHaveAttribute("aria-haspopup", "menu");
+      expect(toggle()).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      await fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      expect(onconnect).toHaveBeenCalledWith("p1", "open_vpn");
+    });
+
+    it("lists both transports and connects with the picked one without remembering it", async () => {
+      const onconnect = vi.fn();
+      render(ProfileList, props({ profiles: [only("wire_guard", "open_vpn")], onconnect }));
+
+      await fireEvent.click(toggle());
+      expect(toggle()).toHaveAttribute("aria-expanded", "true");
+      const menu = screen.getByRole("menu");
+      expect(toggle()).toHaveAttribute("aria-controls", menu.id);
+      const items = screen.getAllByRole("menuitem");
+      expect(items.map((item) => item.textContent)).toEqual(["OpenVPN", "WireGuard"]);
+      expect(items[0]).toHaveFocus();
+
+      await fireEvent.click(screen.getByRole("menuitem", { name: "WireGuard" }));
+      expect(onconnect).toHaveBeenCalledWith("p1", "wire_guard");
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(toggle()).toHaveAttribute("aria-expanded", "false");
+
+      await fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      expect(onconnect).toHaveBeenLastCalledWith("p1", "open_vpn");
+    });
+
+    it("moves through the menu with the keyboard and closes on Escape", async () => {
+      render(ProfileList, props({ profiles: [only("wire_guard", "open_vpn")] }));
+
+      await fireEvent.keyDown(toggle(), { key: "ArrowDown" });
+      const [openvpn, wireguard] = screen.getAllByRole("menuitem");
+      expect(openvpn).toHaveFocus();
+
+      await fireEvent.keyDown(openvpn, { key: "ArrowDown" });
+      expect(wireguard).toHaveFocus();
+      await fireEvent.keyDown(wireguard, { key: "ArrowDown" });
+      expect(openvpn).toHaveFocus();
+      await fireEvent.keyDown(openvpn, { key: "End" });
+      expect(wireguard).toHaveFocus();
+      await fireEvent.keyDown(wireguard, { key: "Home" });
+      expect(openvpn).toHaveFocus();
+
+      await fireEvent.keyDown(openvpn, { key: "Escape" });
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(toggle()).toHaveFocus();
+      expect(toggle()).toHaveAttribute("aria-expanded", "false");
+    });
+
+    it("closes on Tab and Shift+Tab without trapping focus", async () => {
+      render(ProfileList, props({ profiles: [only("wire_guard", "open_vpn")] }));
+
+      for (const shiftKey of [false, true]) {
+        await fireEvent.click(toggle());
+        const [item] = screen.getAllByRole("menuitem");
+        const notPrevented = await fireEvent.keyDown(item, { key: "Tab", shiftKey });
+        expect(notPrevented).toBe(true);
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(toggle()).toHaveAttribute("aria-expanded", "false");
+      }
+    });
+
+    it("stays open when the profile list refreshes with the same profiles", async () => {
+      const { rerender } = render(ProfileList, props({ profiles: [only("wire_guard", "open_vpn")] }));
+
+      await fireEvent.click(toggle());
+      const [item] = screen.getAllByRole("menuitem");
+      await rerender(props({ profiles: [only("wire_guard", "open_vpn")] }));
+
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+      expect(toggle()).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getAllByRole("menuitem")[0]).toBe(item);
+    });
+
+    describe("placement", () => {
+      afterEach(() => vi.restoreAllMocks());
+
+      function layout(buttonTop: number) {
+        vi.spyOn(window, "innerHeight", "get").mockReturnValue(600);
+        vi.spyOn(window, "innerWidth", "get").mockReturnValue(400);
+        vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+          if (this.classList.contains("split")) return new DOMRect(16, buttonTop, 136, 28);
+          if (this.classList.contains("list")) return new DOMRect(0, 40, 400, 560);
+          if (this.getAttribute("role") === "menu") return new DOMRect(0, 0, 136, 72);
+          return new DOMRect();
+        });
+      }
+
+      it("floats below the button when there is room", async () => {
+        layout(100);
+        render(ProfileList, props({ profiles: [only("wire_guard", "open_vpn")] }));
+        await fireEvent.click(toggle());
+        const menu = screen.getByRole("menu");
+        expect(menu).toHaveAttribute("data-side", "down");
+        expect(menu.style.top).toBe("132px");
+        expect(menu.style.left).toBe("16px");
+        expect(menu.style.minWidth).toBe("136px");
+      });
+
+      it("opens upward when the button is near the bottom", async () => {
+        layout(540);
+        render(ProfileList, props({ profiles: [only("wire_guard", "open_vpn")] }));
+        await fireEvent.click(toggle());
+        const menu = screen.getByRole("menu");
+        expect(menu).toHaveAttribute("data-side", "up");
+        expect(menu.style.top).toBe("464px");
+      });
+
+      it("re-measures on every open", async () => {
+        layout(540);
+        render(ProfileList, props({ profiles: [only("wire_guard", "open_vpn")] }));
+        await fireEvent.click(toggle());
+        await fireEvent.keyDown(screen.getAllByRole("menuitem")[0], { key: "Escape" });
+
+        vi.restoreAllMocks();
+        layout(100);
+        await fireEvent.click(toggle());
+        expect(screen.getByRole("menu")).toHaveAttribute("data-side", "down");
+      });
+
+      it("follows the button when the list scrolls", async () => {
+        layout(100);
+        render(ProfileList, props({ profiles: [only("wire_guard", "open_vpn")] }));
+        await fireEvent.click(toggle());
+
+        vi.restoreAllMocks();
+        layout(540);
+        await fireEvent.scroll(screen.getByRole("list"));
+        const menu = screen.getByRole("menu");
+        expect(menu).toHaveAttribute("data-side", "up");
+        expect(menu.style.top).toBe("464px");
+      });
+
+      it("keeps its place and scroll position when the menu itself scrolls", async () => {
+        layout(100);
+        render(ProfileList, props({ profiles: [only("wire_guard", "open_vpn")] }));
+        await fireEvent.click(toggle());
+        const menu = screen.getByRole("menu");
+        menu.scrollTop = 20;
+
+        vi.restoreAllMocks();
+        layout(540);
+        await fireEvent.scroll(menu);
+        expect(menu).toHaveAttribute("data-side", "down");
+        expect(menu.style.top).toBe("132px");
+        expect(menu.scrollTop).toBe(20);
+      });
+
+      it("closes without taking focus when the list scrolls the button out of view", async () => {
+        layout(100);
+        render(ProfileList, props({ profiles: [only("wire_guard", "open_vpn")] }));
+        await fireEvent.click(toggle());
+
+        vi.restoreAllMocks();
+        layout(20);
+        await fireEvent.scroll(screen.getByRole("list"));
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(toggle()).toHaveAttribute("aria-expanded", "false");
+        expect(toggle()).not.toHaveFocus();
+      });
+
+      it("removes its listeners when unmounted while open", async () => {
+        const { unmount } = render(ProfileList, props({ profiles: [only("wire_guard", "open_vpn")] }));
+        const added = [vi.spyOn(document, "addEventListener"), vi.spyOn(window, "addEventListener")];
+        const removed = [vi.spyOn(document, "removeEventListener"), vi.spyOn(window, "removeEventListener")];
+        await fireEvent.click(toggle());
+
+        const watched = ["pointerdown", "scroll", "resize"];
+        const listeners = added.flatMap((spy) => spy.mock.calls).filter(([type]) => watched.includes(type));
+        expect(listeners.map(([type]) => type).sort()).toEqual(["pointerdown", "resize", "scroll"]);
+
+        unmount();
+        const calls = removed.flatMap((spy) => spy.mock.calls);
+        for (const listener of listeners) expect(calls).toContainEqual(listener);
+      });
+    });
+
+    it("overlays the list instead of taking layout space", async () => {
+      const { container } = render(ProfileList, props({ profiles: [only("wire_guard", "open_vpn")] }));
+      await fireEvent.click(toggle());
+      const menu = screen.getByRole("menu");
+      expect(getComputedStyle(menu).position).toBe("fixed");
+      expect(container.querySelector(".split")).toContainElement(menu);
+    });
+
+    it("closes when clicking outside or toggling again", async () => {
+      const onconnect = vi.fn();
+      render(ProfileList, props({ profiles: [only("wire_guard", "open_vpn")], onconnect }));
+
+      await fireEvent.click(toggle());
+      await fireEvent.pointerDown(document.body);
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      await fireEvent.click(toggle());
+      await fireEvent.pointerDown(toggle());
+      await fireEvent.click(toggle());
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(onconnect).not.toHaveBeenCalled();
+    });
+
+    it("disables the picker while another session is active", () => {
+      render(
+        ProfileList,
+        props({
+          profiles: [only("wire_guard", "open_vpn"), { ...profile("p2", "Home"), transports: ["open_vpn"] }],
+          statuses: { p2: status("p2", "connected") },
+        }),
+      );
+      expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
+      expect(toggle()).toBeDisabled();
+    });
+
+    it("replaces the picker while connecting or connected", async () => {
+      const { rerender } = render(
+        ProfileList,
+        props({ profiles: [only("wire_guard", "open_vpn")], busy: { p1: "connect" } }),
+      );
+      expect(screen.queryByRole("button", { name: "Connect" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Choose transport" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+
+      await rerender(props({ profiles: [only("wire_guard", "open_vpn")], statuses: { p1: status("p1", "connected") } }));
+      expect(screen.queryByRole("button", { name: "Choose transport" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Disconnect" })).toBeEnabled();
+    });
+
+    it("does not reopen the menu after a connect attempt ends", async () => {
+      const profiles = [only("wire_guard", "open_vpn")];
+      const { rerender } = render(ProfileList, props({ profiles }));
+
+      await fireEvent.click(toggle());
+      await rerender(props({ profiles, busy: { p1: "connect" } }));
+      await rerender(props({ profiles }));
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(toggle()).toHaveAttribute("aria-expanded", "false");
+    });
   });
 });

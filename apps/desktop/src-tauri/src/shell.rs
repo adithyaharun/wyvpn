@@ -281,7 +281,7 @@ pub fn on_menu(app: &AppHandle, id: &str) {
                 "connect" => app
                     .state::<Ctx>()
                     .settings()
-                    .connect_request(profile_id.to_owned()),
+                    .connect_request(profile_id.to_owned(), None),
                 "disconnect" => {
                     app.state::<Ctx>().mark_user_disconnect(profile_id);
                     Request::Disconnect {
@@ -483,7 +483,7 @@ pub fn check_auto_connect(app: &AppHandle) {
             let handle = app.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = bridge
-                    .ok(settings.connect_request(profile_id.clone()))
+                    .ok(settings.connect_request(profile_id.clone(), None))
                     .await
                 {
                     tracing::warn!("auto-connect failed: {}", error.code);

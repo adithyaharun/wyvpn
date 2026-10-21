@@ -20,6 +20,7 @@ import type {
   ErrorBody,
   PendingCredentials,
   ProfileSummary,
+  Transport,
 } from "./types";
 
 export { applyEvent, initialState, activeSession, isActive } from "./reducer";
@@ -179,9 +180,9 @@ export class DaemonStore {
     return profile;
   }
 
-  connect(profileId: string): Promise<void> {
+  connect(profileId: string, transport?: Transport): Promise<void> {
     return this.#run(profileId, "connect", async () => {
-      await api.connect(profileId);
+      await api.connect(profileId, transport);
       await this.refreshStatus();
     });
   }

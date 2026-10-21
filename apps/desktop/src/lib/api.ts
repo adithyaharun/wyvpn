@@ -12,6 +12,7 @@ import type {
   Settings,
   StartupNotice,
   SupportTarget,
+  Transport,
 } from "./types";
 
 async function call<T>(command: string, args?: InvokeArgs): Promise<T> {
@@ -31,7 +32,8 @@ export const api = {
     call<ProfileSummary[]>("import_link", { link, replace }),
   replaceImport: (retry: string) => call<ProfileSummary[]>("replace_import", { retry }),
   removeProfile: (profileId: string) => call<null>("remove_profile", { profileId }),
-  connect: (profileId: string) => call<null>("connect", { profileId }),
+  connect: (profileId: string, transport?: Transport) =>
+    call<null>("connect", transport ? { profileId, transport } : { profileId }),
   submitPin: (profileId: string, pin: string) => call<null>("submit_pin", { profileId, pin }),
   cancelCredentials: (profileId: string) => call<null>("cancel_credentials", { profileId }),
   disconnect: (profileId: string) => call<null>("disconnect", { profileId }),

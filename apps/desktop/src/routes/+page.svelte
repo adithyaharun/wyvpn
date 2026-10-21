@@ -92,7 +92,7 @@
     statuses={daemon.statuses}
     busy={daemon.busy}
     available={daemon.available}
-    onconnect={(id) => daemon.connect(id)}
+    onconnect={(id, transport) => daemon.connect(id, transport)}
     ondisconnect={(id) => daemon.disconnect(id)}
     onremove={(id) => daemon.remove(id)}
     onrename={(id, name) => daemon.rename(id, name)}

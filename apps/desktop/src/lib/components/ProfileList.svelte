@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import FilePlus from "@lucide/svelte/icons/file-plus";
   import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import Pencil from "@lucide/svelte/icons/pencil";
@@ -9,15 +10,17 @@
   import type { Attachment } from "svelte/attachments";
   import { describeRenameError, toCommandError } from "$lib/errors";
   import { transportLabel } from "$lib/format";
+  import { isWithin, placeMenu } from "$lib/placement";
   import { isActive } from "$lib/reducer";
-  import type { BusyAction, ConnectionStatus, ProfileSummary } from "$lib/types";
+  import { defaultTransport, transportChoices } from "$lib/transport";
+  import type { BusyAction, ConnectionStatus, ProfileSummary, Transport } from "$lib/types";
 
   interface Props {
     profiles: ProfileSummary[];
     statuses: Record<string, ConnectionStatus>;
     busy: Record<string, BusyAction>;
     available: boolean;
-    onconnect: (profileId: string) => void;
+    onconnect: (profileId: string, transport?: Transport) => void;
     ondisconnect: (profileId: string) => void;
     onremove: (profileId: string) => void;
     onrename: (profileId: string, name: string) => Promise<unknown>;
@@ -45,6 +48,8 @@
   let saving = $state(false);
   let renameError = $state<string | null>(null);
   const renameButtons: Record<string, HTMLButtonElement | undefined> = {};
+  let menuFor = $state<string | null>(null);
+  const menuToggles: Record<string, HTMLButtonElement | undefined> = {};
   let nameInput = $state<HTMLInputElement>();
   // The daemon counts Unicode scalar values, not UTF-16 units as maxlength does.
   const tooLong = $derived([...draft.trim()].length > NAME_LIMIT);
@@ -103,6 +108,97 @@
   const activeId = $derived(
     Object.values(statuses).find((status) => isActive(status.state))?.profile_id ?? null,
   );
+
+  function closeMenu(profileId: string, refocus: boolean) {
+    if (menuFor !== profileId) return;
+    menuFor = null;
+    if (refocus) menuToggles[profileId]?.focus();
+  }
+
+  function pickTransport(profileId: string, transport: Transport) {
+    menuFor = null;
+    onconnect(profileId, transport);
+  }
+
+  function onToggleKey(event: KeyboardEvent, profileId: string) {
+    if (event.key !== "ArrowDown") return;
+    event.preventDefault();
+    menuFor = profileId;
+  }
+
+  function onMenuKey(event: KeyboardEvent, profileId: string) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenu(profileId, true);
+      return;
+    }
+    if (event.key === "Tab") {
+      closeMenu(profileId, false);
+      return;
+    }
+    const items = [...(event.currentTarget as HTMLElement).querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    const current = items.indexOf(document.activeElement as HTMLElement);
+    const last = items.length - 1;
+    const targets: Record<string, number> = {
+      ArrowDown: current >= last ? 0 : current + 1,
+      ArrowUp: current <= 0 ? last : current - 1,
+      Home: 0,
+      End: last,
+    };
+    const next = targets[event.key];
+    if (next === undefined) return;
+    event.preventDefault();
+    items[next]?.focus({ preventScroll: true });
+  }
+
+  function onSplitFocusOut(event: FocusEvent, profileId: string) {
+    const next = event.relatedTarget;
+    if (next instanceof Node && !(event.currentTarget as HTMLElement).contains(next)) closeMenu(profileId, false);
+  }
+
+  const transportMenu =
+    (profileId: string): Attachment<HTMLElement> =>
+    (node) => {
+      const anchor = node.parentElement;
+      const place = () => {
+        if (!anchor) return;
+        const box = anchor.getBoundingClientRect();
+        node.style.minWidth = `${box.width}px`;
+        node.style.maxHeight = "";
+        const { side, top, left, maxHeight } = placeMenu(box, node.getBoundingClientRect(), {
+          width: window.innerWidth,
+          height: window.innerHeight,
+        });
+        node.dataset.side = side;
+        node.style.top = `${top}px`;
+        node.style.left = `${left}px`;
+        node.style.maxHeight = `${maxHeight}px`;
+      };
+      const list = node.closest<HTMLElement>(".list");
+      const follow = (event: Event) => {
+        if (event.target instanceof Node && node.contains(event.target)) return;
+        if (anchor && list && !isWithin(anchor.getBoundingClientRect(), list.getBoundingClientRect())) {
+          closeMenu(profileId, false);
+          return;
+        }
+        place();
+      };
+      place();
+      node.querySelector<HTMLElement>('[role="menuitem"]')?.focus({ preventScroll: true });
+      const onPointerDown = (event: PointerEvent) => {
+        if (!anchor?.contains(event.target as Node)) closeMenu(profileId, false);
+      };
+      document.addEventListener("pointerdown", onPointerDown);
+      document.addEventListener("scroll", follow, true);
+      window.addEventListener("resize", follow);
+      return () => {
+        document.removeEventListener("pointerdown", onPointerDown);
+        document.removeEventListener("scroll", follow, true);
+        window.removeEventListener("resize", follow);
+        if (menuFor === profileId) menuFor = null;
+      };
+    };
 
   function confirmRemove(profileId: string) {
     confirming = null;
@@ -231,15 +327,72 @@
                   Disconnecting…
                 </button>
               {:else}
-                <button
-                  class="btn btn-primary main"
-                  type="button"
-                  disabled={locked || otherActive}
-                  onclick={() => onconnect(profile.id)}
-                >
-                  <Plug size={16} strokeWidth={1.75} aria-hidden="true" />
-                  Connect
-                </button>
+                {@const choices = transportChoices(profile.transports)}
+                {@const preferred = defaultTransport(profile.transports)}
+                {@const blocked = locked || otherActive}
+                {#if preferred && choices.length > 1}
+                  {@const pid = profile.id}
+                  {@const menuId = `${uid}-${pid}-transports`}
+                  {@const open = menuFor === profile.id && !blocked}
+                  <div class="split" role="group" onfocusout={(event) => onSplitFocusOut(event, profile.id)}>
+                    <button
+                      class="btn btn-primary main split-main"
+                      type="button"
+                      title="Connect with {transportLabel(preferred)}"
+                      disabled={blocked}
+                      onclick={() => onconnect(profile.id, preferred)}
+                    >
+                      <Plug size={16} strokeWidth={1.75} aria-hidden="true" />
+                      Connect
+                    </button>
+                    <button
+                      class="btn btn-primary split-toggle"
+                      type="button"
+                      aria-label="Choose transport"
+                      title="Choose transport"
+                      aria-haspopup="menu"
+                      aria-expanded={open}
+                      aria-controls={open ? menuId : undefined}
+                      disabled={blocked}
+                      bind:this={menuToggles[profile.id]}
+                      onclick={() => (menuFor = open ? null : profile.id)}
+                      onkeydown={(event) => onToggleKey(event, profile.id)}
+                    >
+                      <ChevronDown size={16} strokeWidth={1.75} aria-hidden="true" />
+                    </button>
+                    {#if open}
+                      <div
+                        id={menuId}
+                        class="menu"
+                        role="menu"
+                        aria-label="Connect with"
+                        tabindex="-1"
+                        onkeydown={(event) => onMenuKey(event, profile.id)}
+                        {@attach transportMenu(pid)}
+                      >
+                        {#each choices as transport (transport)}
+                          <button
+                            class="menu-item"
+                            type="button"
+                            role="menuitem"
+                            tabindex="-1"
+                            onclick={() => pickTransport(profile.id, transport)}>{transportLabel(transport)}</button
+                          >
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                {:else}
+                  <button
+                    class="btn btn-primary main"
+                    type="button"
+                    disabled={blocked}
+                    onclick={() => onconnect(profile.id, preferred)}
+                  >
+                    <Plug size={16} strokeWidth={1.75} aria-hidden="true" />
+                    Connect
+                  </button>
+                {/if}
               {/if}
               <span class="tools">
                 <button
@@ -400,6 +553,59 @@
   .main {
     min-width: 136px;
     justify-content: center;
+  }
+
+  .split {
+    display: inline-flex;
+  }
+
+  .split-main {
+    min-width: 108px;
+    border-start-end-radius: 0;
+    border-end-end-radius: 0;
+  }
+
+  .split-toggle {
+    justify-content: center;
+    width: 28px;
+    padding: 0;
+    border-inline-start-color: color-mix(in srgb, var(--paper) 28%, transparent);
+    border-start-start-radius: 0;
+    border-end-start-radius: 0;
+  }
+
+  .menu {
+    position: fixed;
+    z-index: 20;
+    display: grid;
+    align-content: start;
+    overflow-y: auto;
+    padding: 4px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface);
+    box-shadow: 0 6px 20px rgb(0 0 0 / 0.14);
+  }
+
+  .menu-item {
+    min-height: 28px;
+    padding: 4px 10px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    font-weight: 550;
+    text-align: start;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .menu-item:hover,
+  .menu-item:focus-visible {
+    background: var(--hover);
+  }
+
+  .menu-item:focus-visible {
+    outline-offset: -2px;
   }
 
   .tools {

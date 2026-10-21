@@ -5,7 +5,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 use tauri_plugin_opener::OpenerExt;
 use wyvpn_ipc::{
-    ConnectionStatus, ImportSource, MAX_IMPORT_BYTES, ProfileSummary, Request, Sensitive,
+    ConnectionStatus, ImportSource, MAX_IMPORT_BYTES, ProfileSummary, Request, Sensitive, Transport,
 };
 
 use tauri::Manager;
@@ -123,9 +123,13 @@ pub async fn remove_profile(
 }
 
 #[tauri::command]
-pub async fn connect(ctx: State<'_, Ctx>, profile_id: String) -> CmdResult<Value> {
+pub async fn connect(
+    ctx: State<'_, Ctx>,
+    profile_id: String,
+    transport: Option<Transport>,
+) -> CmdResult<Value> {
     ctx.bridge
-        .ok(ctx.settings().connect_request(profile_id))
+        .ok(ctx.settings().connect_request(profile_id, transport))
         .await?;
     Ok(Value::Null)
 }

@@ -710,6 +710,34 @@ mod tests {
     }
 
     #[test]
+    fn connect_transport_accepts_only_known_names() {
+        let decode = |transport: &str| {
+            serde_json::from_str::<Request>(&format!(
+                r#"{{"type":"connect","profile_id":"p1","transport":{transport}}}"#
+            ))
+        };
+        for (name, expected) in [
+            ("open_vpn", Transport::OpenVpn),
+            ("wire_guard", Transport::WireGuard),
+        ] {
+            assert_eq!(serde_json::to_value(expected).unwrap(), name);
+            assert!(matches!(
+                decode(&format!("\"{name}\"")).unwrap(),
+                Request::Connect { transport: Some(t), .. } if t == expected
+            ));
+        }
+        for bad in [
+            r#""wireguard""#,
+            r#""WireGuard""#,
+            r#""openvpn""#,
+            r#""""#,
+            "1",
+        ] {
+            assert!(decode(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn payloads_without_new_fields_decode() {
         let connect: Request =
             serde_json::from_str(r#"{"type":"connect","profile_id":"p1","transport":null}"#)

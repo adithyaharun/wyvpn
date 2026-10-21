@@ -62,6 +62,16 @@ describe("DaemonStore", () => {
 
   afterEach(() => stop());
 
+  it("passes the chosen transport to connect and omits it otherwise", async () => {
+    await store.connect("p1", "wire_guard");
+    expect(invoke).toHaveBeenCalledWith("connect", { profileId: "p1", transport: "wire_guard" });
+
+    invoke.mockClear();
+    await store.connect("p1");
+    const call = invoke.mock.calls.find(([command]) => command === "connect");
+    expect(call?.[1]).toStrictEqual({ profileId: "p1" });
+  });
+
   it("applies pushed statuses and profiles", () => {
     emit("daemon://statuses", [{ ...awaiting, state: "connected", awaiting: undefined }]);
     expect(store.session?.state).toBe("connected");

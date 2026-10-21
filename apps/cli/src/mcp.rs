@@ -86,7 +86,7 @@ impl WyvpnMcp {
         let mut client = self.client().await?;
         let view = tokio::time::timeout(
             CONNECT_TIMEOUT,
-            connect::run(&mut client, profile_id, connect::Pin::Unavailable),
+            connect::run(&mut client, profile_id, None, connect::Pin::Unavailable),
         )
         .await
         .map_err(|_| tool_error("timed out waiting for the connection"))?

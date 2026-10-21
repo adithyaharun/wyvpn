@@ -2,7 +2,9 @@ use std::io::BufRead;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail, ensure};
-use wyvpn_ipc::{AuthMode, ConnectionState, ErrorBody, ErrorCode, Event, Request, Sensitive};
+use wyvpn_ipc::{
+    AuthMode, ConnectionState, ErrorBody, ErrorCode, Event, Request, Sensitive, Transport,
+};
 use zeroize::Zeroizing;
 
 use crate::client::Client;
@@ -53,12 +55,17 @@ async fn status_of(client: &mut Client, profile_id: &str) -> anyhow::Result<Stat
         .context("the daemon reported no status for the profile")
 }
 
-pub async fn run(client: &mut Client, profile_id: String, pin: Pin) -> anyhow::Result<StatusView> {
+pub async fn run(
+    client: &mut Client,
+    profile_id: String,
+    transport: Option<Transport>,
+    pin: Pin,
+) -> anyhow::Result<StatusView> {
     client.call(Request::Subscribe).await?;
     client
         .call(Request::Connect {
             profile_id: profile_id.clone(),
-            transport: None,
+            transport,
             auto_reconnect: None,
         })
         .await?;

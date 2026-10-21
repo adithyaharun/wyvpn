@@ -134,9 +134,12 @@ pub fn profiles_table(profiles: &[ProfileSummary]) -> String {
 
 pub fn connected_line(status: &ConnectionStatus) -> String {
     let ip = status.tunnel_ip.as_deref().unwrap_or("-");
+    let transport = status
+        .transport
+        .map_or_else(String::new, |t| format!(" ({})", transport_name(t)));
     match &status.server_endpoint {
-        Some(endpoint) => format!("connected: {ip} via {endpoint}"),
-        None => format!("connected: {ip}"),
+        Some(endpoint) => format!("connected{transport}: {ip} via {endpoint}"),
+        None => format!("connected{transport}: {ip}"),
     }
 }
 
@@ -240,5 +243,15 @@ mod tests {
         assert_eq!(duration(3725), "1h02m05s");
         assert_eq!(bytes(512), "512 B");
         assert_eq!(bytes(1536), "1.5 KiB");
+    }
+
+    #[test]
+    fn connected_line_names_the_transport() {
+        let status = ConnectionStatus {
+            tunnel_ip: Some("10.0.0.2".into()),
+            transport: Some(Transport::WireGuard),
+            ..ConnectionStatus::disconnected("p")
+        };
+        assert_eq!(connected_line(&status), "connected (wireguard): 10.0.0.2");
     }
 }

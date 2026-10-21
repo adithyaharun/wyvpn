@@ -5,8 +5,8 @@ mod mcp;
 mod output;
 mod view;
 
-use clap::{Parser, Subcommand};
-use wyvpn_ipc::{Request, Response};
+use clap::{Parser, Subcommand, ValueEnum};
+use wyvpn_ipc::{Request, Response, Transport};
 
 #[derive(Parser)]
 #[command(name = "wyvpn-cli", version, about = "WyVPN command-line client")]
@@ -17,6 +17,21 @@ struct Cli {
 
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum TransportArg {
+    Openvpn,
+    Wireguard,
+}
+
+impl From<TransportArg> for Transport {
+    fn from(arg: TransportArg) -> Self {
+        match arg {
+            TransportArg::Openvpn => Transport::OpenVpn,
+            TransportArg::Wireguard => Transport::WireGuard,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -31,6 +46,9 @@ enum Command {
         /// Read the PIN from the first line of stdin instead of prompting
         #[arg(long)]
         pin_stdin: bool,
+        /// Tunnel transport to use; the daemon default (OpenVPN) when omitted
+        #[arg(long, value_enum)]
+        transport: Option<TransportArg>,
     },
     /// Disconnect a profile by id or name
     Disconnect { profile: String },
@@ -91,13 +109,20 @@ async fn main() -> anyhow::Result<()> {
                 Ok(())
             }
         }
-        Command::Connect { profile, pin_stdin } => {
+        Command::Connect {
+            profile,
+            pin_stdin,
+            transport,
+        } => {
+            let transport = transport.map(Transport::from);
             let mut client = client::Client::connect(&socket).await?;
-            let profile_id = resolve(&mut client, &profile).await?;
+            let profiles = view::fetch_profiles(&mut client).await?;
+            let profile_id = view::resolve_profile(&profiles, &profile)?;
+            view::ensure_transport(&profiles, &profile_id, transport)?;
             let pin = connect::Pin::Prompt {
                 from_stdin: pin_stdin,
             };
-            let view = connect::run(&mut client, profile_id, pin).await?;
+            let view = connect::run(&mut client, profile_id, transport, pin).await?;
             if cli.json {
                 print_json(&view)
             } else {
@@ -178,5 +203,46 @@ async fn control(socket: &str, json: bool, request: Request) -> anyhow::Result<(
     } else {
         println!("ok");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_transport(args: &[&str]) -> Result<Option<Transport>, clap::Error> {
+        let cli = Cli::try_parse_from(
+            ["wyvpn-cli", "connect", "p"]
+                .into_iter()
+                .chain(args.iter().copied()),
+        )?;
+        let Command::Connect { transport, .. } = cli.command else {
+            unreachable!()
+        };
+        Ok(transport.map(Transport::from))
+    }
+
+    #[test]
+    fn transport_flag_maps_each_value() {
+        assert_eq!(
+            parse_transport(&["--transport", "openvpn"]).unwrap(),
+            Some(Transport::OpenVpn)
+        );
+        assert_eq!(
+            parse_transport(&["--transport", "wireguard"]).unwrap(),
+            Some(Transport::WireGuard)
+        );
+    }
+
+    #[test]
+    fn missing_transport_flag_is_none() {
+        assert_eq!(parse_transport(&[]).unwrap(), None);
+    }
+
+    #[test]
+    fn invalid_transport_is_rejected() {
+        for value in ["wire_guard", "WireGuard", "open_vpn", "tcp", ""] {
+            assert!(parse_transport(&["--transport", value]).is_err(), "{value}");
+        }
     }
 }

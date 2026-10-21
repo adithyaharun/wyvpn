@@ -10,8 +10,8 @@ use wyvpn_core::sign::{generate_nonce, unix_now};
 use wyvpn_core::sync::{SyncOutcome, build_sync_request, parse_sync_response};
 use wyvpn_core::tls::TlsPolicy;
 use wyvpn_core::wireguard::{
-    DeviceInfo, KeepaliveInput, PendingKeepalive, PendingRegistration, Platform, RegistrationInput,
-    WireGuardSession,
+    DeviceInfo, KeepaliveInput, Platform, RegistrationInput, WireGuardSession, register_at,
+    send_keepalive_at,
 };
 use wyvpn_core::{AuthMode, Error, NamedProfile, Profile, read_profiles};
 
@@ -258,18 +258,9 @@ async fn live_wireguard_registration() {
 
     let mut registered: Option<(String, WireGuardSession)> = None;
     for host in hosts(profile) {
-        let pending = expect(PendingRegistration::start(profile, &input), "request build");
-        let request = expect(pending.request().clone().into_http(&host), "request build");
-        let response = match client.execute(request).await {
-            Ok(response) => response,
-            Err(err) => {
-                println!("[wg] register host unreachable: {}", describe(&err));
-                continue;
-            }
-        };
-        println!("[wg] register HTTP status: {}", response.status);
-        match pending.finish(&response) {
+        match register_at(&client, &host, profile, &input).await {
             Ok(session) => {
+                println!("[wg] register accepted");
                 registered = Some((host, session));
                 break;
             }
@@ -294,29 +285,12 @@ async fn live_wireguard_registration() {
     );
     println!("[wg] server version: not exposed by the API");
 
-    let pending = expect(
-        PendingKeepalive::start(
-            profile,
-            &session,
-            &KeepaliveInput {
-                device: &device,
-                auth_token: Some(&token),
-            },
-        ),
-        "keepalive build",
-    );
-    let request = expect(
-        pending.request().clone().into_http(&host),
-        "keepalive build",
-    );
-    match client.execute(request).await {
-        Ok(response) => {
-            println!("[wg] keepalive HTTP status: {}", response.status);
-            match pending.finish(&response) {
-                Ok(alive) => println!("[wg] keepalive accepted: {}", alive.status),
-                Err(err) => println!("[wg] keepalive failed: {}", describe(&err)),
-            }
-        }
-        Err(err) => println!("[wg] keepalive unreachable: {}", describe(&err)),
+    let keepalive = KeepaliveInput {
+        device: &device,
+        auth_token: Some(&token),
+    };
+    match send_keepalive_at(&client, &host, profile, &session, &keepalive).await {
+        Ok(alive) => println!("[wg] keepalive accepted: {}", alive.status),
+        Err(err) => println!("[wg] keepalive failed: {}", describe(&err)),
     }
 }

@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
 use crate::tls::{RootVerifier, TlsObservation, TlsPolicy, TlsState, client_config, pin_key};
 use crate::wireguard::blocked_ip;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -89,6 +89,25 @@ pub(crate) fn url_pin_key(url: &Url) -> Option<String> {
 pub struct HttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
+    pub location: Option<String>,
+}
+
+#[must_use]
+pub fn is_slash_redirect(request_url: &Url, response: &HttpResponse) -> bool {
+    if !matches!(response.status, 307 | 308) || request_url.path().ends_with('/') {
+        return false;
+    }
+    let Some(target) = response
+        .location
+        .as_deref()
+        .and_then(|location| request_url.join(location).ok())
+    else {
+        return false;
+    };
+    target.origin() == request_url.origin()
+        && target.query() == request_url.query()
+        && target.fragment().is_none()
+        && target.path().strip_suffix('/') == Some(request_url.path())
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +118,7 @@ pub struct ApiClient {
     state: Arc<TlsState>,
     allow_http: bool,
     filter_resolved: bool,
+    slash_origins: Arc<Mutex<HashSet<String>>>,
 }
 
 impl ApiClient {
@@ -117,7 +137,23 @@ impl ApiClient {
             verifier,
             state: Arc::default(),
             allow_http: false,
+            slash_origins: Arc::default(),
         }
+    }
+
+    #[must_use]
+    pub fn prefers_slash(&self, url: &Url) -> bool {
+        self.slash_origins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&url.origin().ascii_serialization())
+    }
+
+    pub fn remember_slash(&self, url: &Url) {
+        self.slash_origins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(url.origin().ascii_serialization());
     }
 
     fn client_for(&self, port: u16) -> Result<reqwest::Client> {
@@ -163,6 +199,17 @@ impl ApiClient {
         self.state.observation(&url_pin_key(url)?)
     }
 
+    pub async fn execute_cloned(&self, request: &HttpRequest) -> Result<HttpResponse> {
+        self.execute(HttpRequest {
+            method: request.method.clone(),
+            url: request.url.clone(),
+            headers: request.headers.clone(),
+            body: request.body.clone(),
+            timeout: request.timeout,
+        })
+        .await
+    }
+
     pub async fn execute(&self, request: HttpRequest) -> Result<HttpResponse> {
         match request.url.scheme() {
             "https" => {}
@@ -189,7 +236,6 @@ impl ApiClient {
                     expected: expected.to_string(),
                     actual: actual.to_string(),
                 }),
-                None if self.state.take_unpinned(&key) => Err(Error::PinRequired(key)),
                 None => Err(err),
             },
         }
@@ -198,6 +244,11 @@ impl ApiClient {
     async fn read(&self, builder: reqwest::RequestBuilder) -> Result<HttpResponse> {
         let mut response = builder.send().await?;
         let status = response.status().as_u16();
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await? {
             body.extend_from_slice(&chunk);
@@ -205,7 +256,11 @@ impl ApiClient {
                 return Err(Error::InvalidResponse("response body too large".into()));
             }
         }
-        Ok(HttpResponse { status, body })
+        Ok(HttpResponse {
+            status,
+            body,
+            location,
+        })
     }
 }
 

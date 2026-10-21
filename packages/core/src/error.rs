@@ -43,11 +43,9 @@ pub enum Error {
     #[error("tls setup failed: {0}")]
     Tls(String),
     #[error(
-        "server certificate changed (pinned {expected}, presented {actual}); explicit re-trust required"
+        "server certificate changed (pinned {expected}, presented {actual}); re-import the profile to trust the new certificate"
     )]
     CertificateChanged { expected: String, actual: String },
-    #[error("{0} is an IP address without a pinned certificate; pin it before connecting")]
-    PinRequired(String),
     #[error("server returned status {0}")]
     Status(u16),
     #[error("server link or resource not found")]

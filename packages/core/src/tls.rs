@@ -4,7 +4,7 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{CertificateError, ClientConfig, DigitallySignedStruct, SignatureScheme};
 use sha2::{Digest, Sha256};
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -74,6 +74,10 @@ impl<'de> serde::Deserialize<'de> for Fingerprint {
 
 pub type Pins = BTreeMap<String, Fingerprint>;
 
+pub fn has_pin(pins: &Pins, host: &str, port: u16) -> bool {
+    normalize_pins(pins).0.contains_key(&pin_key(host, port))
+}
+
 pub fn pin_key(host: &str, port: u16) -> String {
     let host = host.trim_matches(['[', ']']);
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
@@ -122,8 +126,13 @@ fn normalize_pins(pins: &Pins) -> (Pins, HashMap<String, Fingerprint>) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TlsPolicy {
     Verify,
-    TrustOnFirstUse { pins: Pins },
-    Strict { pins: Pins },
+    TrustOnFirstUse {
+        pins: Pins,
+    },
+    /// Unpinned DNS names need CA verification; unpinned IPs are trusted on first use.
+    Strict {
+        pins: Pins,
+    },
 }
 
 impl TlsPolicy {
@@ -150,7 +159,6 @@ pub struct TlsObservation {
 struct State {
     observed: HashMap<String, TlsObservation>,
     mismatch: HashMap<String, (Fingerprint, Fingerprint)>,
-    unpinned: HashSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -165,10 +173,6 @@ impl TlsState {
 
     pub(crate) fn observation(&self, key: &str) -> Option<TlsObservation> {
         self.lock().observed.get(key).copied()
-    }
-
-    pub(crate) fn take_unpinned(&self, key: &str) -> bool {
-        self.lock().unpinned.remove(key)
     }
 
     pub(crate) fn take_mismatch(&self, key: &str) -> Option<(Fingerprint, Fingerprint)> {
@@ -250,13 +254,7 @@ impl ServerCertVerifier for PinningVerifier {
             self.record(key, fingerprint, verified);
             return Ok(ServerCertVerified::assertion());
         }
-        if strict {
-            if matches!(server_name, ServerName::IpAddress(_)) {
-                self.state.lock().unpinned.insert(key);
-                return Err(rustls::Error::InvalidCertificate(
-                    CertificateError::ApplicationVerificationFailure,
-                ));
-            }
+        if strict && !matches!(server_name, ServerName::IpAddress(_)) {
             if roots.is_ok() {
                 self.record(key, fingerprint, true);
             }
@@ -580,14 +578,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strict_refuses_an_unpinned_ip_even_with_a_valid_chain() {
+    async fn strict_trusts_an_unpinned_ip_on_first_use_and_reports_it() {
+        let server = self_signed_server().await;
+        let client = ApiClient::new(TlsPolicy::strict(Pins::new())).unwrap();
+        assert_eq!(client.execute(get(server.port)).await.unwrap().status, 200);
+        let seen = client.tls_observation(&url(server.port)).unwrap();
+        assert_eq!(seen.fingerprint, server.fingerprint);
+        assert!(!seen.verified_by_roots);
+    }
+
+    #[tokio::test]
+    async fn strict_pin_on_an_ip_still_rejects_a_different_certificate() {
         let (server, roots) = ca_signed_server().await;
-        let client = ApiClient::with_verifier(TlsPolicy::strict(Pins::new()), roots);
-        let err = client.execute(get(server.port)).await.unwrap_err();
-        match err {
-            Error::PinRequired(host) => assert_eq!(host, pin_key("127.0.0.1", server.port)),
-            other => panic!("unexpected {other:?}"),
-        }
+        let stale = Fingerprint::of_certificate(b"previous certificate");
+        let client = ApiClient::with_verifier(TlsPolicy::strict(pins(server.port, stale)), roots);
+        assert!(matches!(
+            client.execute(get(server.port)).await.unwrap_err(),
+            Error::CertificateChanged { .. }
+        ));
+    }
+
+    #[test]
+    fn has_pin_matches_normalized_keys() {
+        let fp = Fingerprint::of_certificate(b"cert");
+        let pins = Pins::from([("[::ffff:7f00:1]:443".to_owned(), fp)]);
+        assert!(has_pin(&pins, "127.0.0.1", 443));
+        assert!(!has_pin(&pins, "127.0.0.1", 444));
+        assert!(!has_pin(&Pins::new(), "127.0.0.1", 443));
     }
 
     #[tokio::test]

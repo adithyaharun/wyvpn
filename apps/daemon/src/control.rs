@@ -161,7 +161,6 @@ pub fn core_error(err: &Error) -> ErrorBody {
         | Error::Tls(_)
         | Error::CertificateChanged { .. }
         | Error::Status(_)
-        | Error::PinRequired(_)
         | Error::NotFound
         | Error::Forbidden
         | Error::ResponseSignature

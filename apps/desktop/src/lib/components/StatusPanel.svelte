@@ -112,7 +112,7 @@
     </div>
   </dl>
 
-  <p class="alert" role="alert">{error ?? ""}</p>
+  <p class="alert" class:empty={!error} role="alert">{error ?? ""}</p>
 </section>
 
 <style>
@@ -295,8 +295,11 @@
   }
 
   .alert {
-    min-height: 1.45em;
     margin-top: 8px;
     color: var(--error);
+  }
+
+  .alert.empty {
+    margin-top: 0;
   }
 </style>

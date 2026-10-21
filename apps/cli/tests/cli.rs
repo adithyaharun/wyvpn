@@ -34,7 +34,7 @@ fn spawn_daemon(path: &std::path::Path) {
                                 server_host: "vpn.example.com".into(),
                                 user: "alice".into(),
                                 auth_mode: AuthMode::Pin,
-                                transports: vec![Transport::WireGuard],
+                                transports: vec![Transport::OpenVpn, Transport::WireGuard],
                                 imported_name: None,
                             }],
                         },
@@ -94,7 +94,7 @@ fn summary() -> ProfileSummary {
         server_host: "vpn.example.com".into(),
         user: "alice".into(),
         auth_mode: AuthMode::Pin,
-        transports: vec![Transport::WireGuard],
+        transports: vec![Transport::OpenVpn],
         imported_name: None,
     }
 }
@@ -117,6 +117,7 @@ fn crowded_profiles() -> Vec<ProfileSummary> {
 enum Scenario {
     Legacy,
     Connects,
+    ConnectsDual,
     AuthFails,
     Connected,
     Idle,
@@ -173,7 +174,14 @@ fn spawn_scripted_daemon(path: &std::path::Path, scenario: Scenario) -> Seen {
                             profiles: if matches!(scenario, Scenario::Crowded) {
                                 crowded_profiles()
                             } else {
-                                vec![summary()]
+                                vec![ProfileSummary {
+                                    transports: if matches!(scenario, Scenario::ConnectsDual) {
+                                        vec![Transport::OpenVpn, Transport::WireGuard]
+                                    } else {
+                                        summary().transports
+                                    },
+                                    ..summary()
+                                }]
                             },
                         }),
                         Request::ImportProfile { source, replace } => {
@@ -200,11 +208,15 @@ fn spawn_scripted_daemon(path: &std::path::Path, scenario: Scenario) -> Seen {
                                 .push(format!("remove {profile_id}"));
                             Outcome::Result(Response::Ok)
                         }
-                        Request::Connect { profile_id, .. } => {
+                        Request::Connect {
+                            profile_id,
+                            transport,
+                            ..
+                        } => {
                             recorded
                                 .lock()
                                 .unwrap()
-                                .push(format!("connect {profile_id}"));
+                                .push(format!("connect {profile_id} {transport:?}"));
                             events.push(Event::CredentialsRequired {
                                 profile_id,
                                 mode: AuthMode::Pin,
@@ -217,7 +229,7 @@ fn spawn_scripted_daemon(path: &std::path::Path, scenario: Scenario) -> Seen {
                                 pin.map(|p| p.expose().to_owned()).unwrap_or_default()
                             ));
                             match scenario {
-                                Scenario::Connects => {
+                                Scenario::Connects | Scenario::ConnectsDual => {
                                     events.push(state_event(ConnectionState::Connecting, None));
                                     events.push(state_event(ConnectionState::Connected, None));
                                     Outcome::Result(Response::Ok)
@@ -269,7 +281,9 @@ fn spawn_scripted_daemon(path: &std::path::Path, scenario: Scenario) -> Seen {
                         }
                         Request::Status => {
                             let status = match scenario {
-                                Scenario::Connects | Scenario::Connected => ConnectionStatus {
+                                Scenario::Connects
+                                | Scenario::ConnectsDual
+                                | Scenario::Connected => ConnectionStatus {
                                     profile_name: "Office".into(),
                                     state: ConnectionState::Connected,
                                     transport: Some(Transport::OpenVpn),
@@ -397,7 +411,7 @@ async fn connect_reads_the_pin_from_stdin_and_never_prints_it() {
     assert!(!String::from_utf8(output.stdout).unwrap().contains("4821"));
     assert_eq!(
         *seen.lock().unwrap(),
-        ["connect p1", "pin 4821", "disconnect p1"]
+        ["connect p1 None", "pin 4821", "disconnect p1"]
     );
 }
 
@@ -409,7 +423,7 @@ async fn connect_rejects_an_empty_pin() {
 
     let output = run_with_stdin(&socket, &["connect", "p1", "--pin-stdin"], "\n").await;
     assert!(!output.status.success());
-    assert_eq!(*seen.lock().unwrap(), ["connect p1", "disconnect p1"]);
+    assert_eq!(*seen.lock().unwrap(), ["connect p1 None", "disconnect p1"]);
 }
 
 #[tokio::test]
@@ -422,7 +436,7 @@ async fn connect_disconnects_when_the_pin_read_fails() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("PIN is empty"), "{stderr}");
-    assert_eq!(*seen.lock().unwrap(), ["connect p1", "disconnect p1"]);
+    assert_eq!(*seen.lock().unwrap(), ["connect p1 None", "disconnect p1"]);
 }
 
 #[tokio::test]
@@ -492,9 +506,12 @@ async fn connect_prints_the_tunnel_ip_and_endpoint() {
     let output = run_with_stdin(&socket, &["connect", "Office", "--pin-stdin"], "4821\n").await;
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(stdout.trim(), "connected: 10.8.0.6 via 203.0.113.5:1194");
+    assert_eq!(
+        stdout.trim(),
+        "connected (openvpn): 10.8.0.6 via 203.0.113.5:1194"
+    );
     assert!(!stdout.contains("4821"));
-    assert_eq!(*seen.lock().unwrap(), ["connect p1", "pin 4821"]);
+    assert_eq!(*seen.lock().unwrap(), ["connect p1 None", "pin 4821"]);
 
     let output = run_with_stdin(&socket, &["connect", "p1", "--pin-stdin", "--json"], "1\n").await;
     assert!(output.status.success());
@@ -693,4 +710,39 @@ async fn daemon_without_hello_support_asks_for_update() {
         stderr.contains("update WyVPN or restart the service"),
         "{stderr}"
     );
+}
+
+#[tokio::test]
+async fn connect_rejects_a_transport_the_profile_lacks_before_sending() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("wyvpn.sock");
+    let seen = spawn_scripted_daemon(&socket, Scenario::Connects);
+
+    let output = run(&socket, &["connect", "Office", "--transport", "wireguard"]).await;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("supported transports: openvpn"), "{stderr}");
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn connect_accepts_a_supported_transport() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("wyvpn.sock");
+    let seen = spawn_scripted_daemon(&socket, Scenario::ConnectsDual);
+
+    let output = run_with_stdin(
+        &socket,
+        &[
+            "connect",
+            "Office",
+            "--transport",
+            "wireguard",
+            "--pin-stdin",
+        ],
+        "4821\n",
+    )
+    .await;
+    assert!(output.status.success());
+    assert_eq!(seen.lock().unwrap()[0], "connect p1 Some(WireGuard)");
 }

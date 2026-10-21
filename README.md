@@ -166,6 +166,7 @@ WYVPN_TEST_PIN=... cargo test -p wyvpn-core --features live --test live -- --noc
 wyvpn-cli import profile.tar        # or a .ovpn file, a profile link, or "-" for stdin
 wyvpn-cli list
 wyvpn-cli connect <name-or-id>      # prompts for a PIN if needed; --pin-stdin to pipe it
+wyvpn-cli connect <name-or-id> --transport wireguard   # or openvpn; omit for the default (OpenVPN)
 wyvpn-cli status
 wyvpn-cli disconnect <name-or-id>
 wyvpn-cli rename <name-or-id> "New name"   # --reset restores the imported name

@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use wyvpn_ipc::Request;
+use wyvpn_ipc::{Request, Transport};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -53,10 +53,10 @@ impl Settings {
         self
     }
 
-    pub fn connect_request(&self, profile_id: String) -> Request {
+    pub fn connect_request(&self, profile_id: String, transport: Option<Transport>) -> Request {
         Request::Connect {
             profile_id,
-            transport: None,
+            transport,
             auto_reconnect: Some(self.auto_reconnect),
         }
     }
@@ -153,14 +153,14 @@ mod tests {
             ..Settings::default()
         };
         assert!(matches!(
-            off.connect_request("p".into()),
+            off.connect_request("p".into(), None),
             Request::Connect {
                 auto_reconnect: Some(false),
                 ..
             }
         ));
         assert!(matches!(
-            Settings::default().connect_request("p".into()),
+            Settings::default().connect_request("p".into(), None),
             Request::Connect {
                 auto_reconnect: Some(true),
                 ..

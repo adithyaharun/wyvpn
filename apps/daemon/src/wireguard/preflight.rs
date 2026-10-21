@@ -23,6 +23,9 @@ pub enum Unavailable {
     #[cfg(any(windows, test))]
     #[error("wintun.dll is missing at {path}; reinstall WyVPN")]
     WintunMissing { path: String },
+    #[cfg(windows)]
+    #[error("wintun.dll at {path} cannot be used ({reason}); retry, or reinstall WyVPN")]
+    WintunUnusable { path: String, reason: String },
     #[cfg(any(windows, test))]
     #[error("wintun.dll at {path} is not trusted ({reason}); reinstall WyVPN")]
     WintunUntrusted { path: String, reason: String },
@@ -85,23 +88,31 @@ fn wintun_path() -> anyhow::Result<PathBuf> {
 pub struct SystemProbe;
 
 #[cfg(windows)]
-pub fn verified_wintun() -> Result<PathBuf, Unavailable> {
-    use crate::openvpn::binary::Check;
-
+fn present_wintun() -> Result<PathBuf, Unavailable> {
     let path = wintun_path().map_err(|err| Unavailable::WintunMissing {
         path: err.to_string(),
     })?;
-    let shown = path.display().to_string();
-    if !path.is_file() {
-        return Err(Unavailable::WintunMissing { path: shown });
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(Unavailable::WintunMissing {
+            path: path.display().to_string(),
+        })
     }
-    match crate::openvpn::signature::verify_wintun(&path) {
-        Check::Pass => Ok(path),
-        Check::Skip(reason) | Check::Fail(reason) => Err(Unavailable::WintunUntrusted {
-            path: shown,
-            reason,
-        }),
-    }
+}
+
+#[cfg(windows)]
+pub fn verified_wintun() -> Result<crate::openvpn::signature::WintunModule, Unavailable> {
+    use crate::openvpn::signature::LoadError;
+
+    let path = present_wintun()?;
+    crate::openvpn::signature::load_wintun(&path).map_err(|err| {
+        let path = path.display().to_string();
+        match err {
+            LoadError::Io(reason) => Unavailable::WintunUnusable { path, reason },
+            LoadError::Untrusted(reason) => Unavailable::WintunUntrusted { path, reason },
+        }
+    })
 }
 
 impl Probe for SystemProbe {
@@ -133,7 +144,7 @@ impl Probe for SystemProbe {
 
     #[cfg(windows)]
     fn wintun(&self) -> Result<(), Unavailable> {
-        verified_wintun().map(drop)
+        present_wintun().map(drop)
     }
 
     #[cfg(not(windows))]

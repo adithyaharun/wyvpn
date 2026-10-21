@@ -20,9 +20,16 @@ use super::netops::{LinkConfig, LinkOps};
 const HANDSHAKE_KICK: Duration = Duration::from_millis(250);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[cfg(windows)]
+type PlatformGuard = crate::openvpn::signature::WintunModule;
+
+#[cfg(not(windows))]
+struct PlatformGuard;
+
 struct Running {
     device: Device<DefaultDeviceTransports>,
     public_key: PublicKey,
+    _platform: PlatformGuard,
 }
 
 pub struct UserspaceBackend {
@@ -40,7 +47,7 @@ impl UserspaceBackend {
         }
     }
 
-    fn create_tun() -> anyhow::Result<TunDevice> {
+    fn create_tun() -> anyhow::Result<(TunDevice, PlatformGuard)> {
         let mut config = gotatun::tun::tun::Configuration::default();
         #[cfg(target_os = "linux")]
         config.tun_name(linux_tun_name());
@@ -49,16 +56,22 @@ impl UserspaceBackend {
             platform.enable_routing(false);
         });
         #[cfg(windows)]
+        let mut platform_guard = super::preflight::verified_wintun()?;
+        #[cfg(not(windows))]
+        let platform_guard = PlatformGuard;
+        #[cfg(windows)]
         {
-            let dll = super::preflight::verified_wintun()?;
             config.tun_name(super::netops::WINDOWS_ADAPTER_NAME);
             config.platform_config(|platform| {
-                platform.wintun_file(dll.as_os_str());
+                platform.wintun_file(platform_guard.path().as_os_str());
             });
         }
         let device = gotatun::tun::tun::create_as_async(&config)
             .context("cannot create the tunnel interface")?;
-        TunDevice::from_tun_device(device).context("cannot use the tunnel interface")
+        let tun = TunDevice::from_tun_device(device).context("cannot use the tunnel interface")?;
+        #[cfg(windows)]
+        platform_guard.release_file();
+        Ok((tun, platform_guard))
     }
 }
 
@@ -159,7 +172,7 @@ impl WgBackend for UserspaceBackend {
         let peer = build_peer(config, endpoint)?;
         let public_key = peer.public_key;
 
-        let tun = Self::create_tun()?;
+        let (tun, platform) = Self::create_tun()?;
         let name = tun.name().context("cannot read the interface name")?;
         let link = LinkConfig {
             address: config.address,
@@ -181,7 +194,11 @@ impl WgBackend for UserspaceBackend {
             ))
             .context("cannot start WireGuard")?;
         self.runtime.block_on(kick_handshake(&device, &public_key));
-        self.running = Some(Running { device, public_key });
+        self.running = Some(Running {
+            device,
+            public_key,
+            _platform: platform,
+        });
         Ok(Interface { name })
     }
 

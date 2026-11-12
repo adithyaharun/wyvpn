@@ -20,6 +20,7 @@
         "resizable": false,
         "maximizable": false,
         "visible": false,
+        "create": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "trafficLightPosition": {

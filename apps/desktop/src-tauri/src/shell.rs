@@ -40,6 +40,16 @@ const DAEMON_GRACE: Duration = Duration::from_secs(8);
 const PROBE_WAIT: Duration = Duration::from_secs(2);
 const USER_DISCONNECT_WINDOW: Duration = Duration::from_secs(10);
 
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WindowRequest {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Licenses,
+    UpdatePrompt {
+        outcome: &'static str,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StartupNotice {
     pub profile_id: String,
@@ -73,6 +83,9 @@ pub struct Ctx {
     reapproval: AtomicBool,
     service_error: Mutex<Option<String>>,
     startup_notice: Mutex<Option<StartupNotice>>,
+    window_requests: Mutex<Vec<WindowRequest>>,
+    window_build: tokio::sync::Mutex<()>,
+    closing: AtomicBool,
     issued: AtomicU64,
     applied: AtomicU64,
 }
@@ -103,6 +116,9 @@ impl Ctx {
             reapproval: AtomicBool::new(false),
             service_error: Mutex::default(),
             startup_notice: Mutex::default(),
+            window_requests: Mutex::default(),
+            window_build: tokio::sync::Mutex::new(()),
+            closing: AtomicBool::new(false),
             issued: AtomicU64::new(0),
             applied: AtomicU64::new(0),
         }
@@ -297,6 +313,22 @@ impl Ctx {
             .take()
     }
 
+    pub fn push_window_request(&self, request: WindowRequest) {
+        self.window_requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(request);
+    }
+
+    pub fn take_window_requests(&self) -> Vec<WindowRequest> {
+        std::mem::take(
+            &mut *self
+                .window_requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+    }
+
     pub fn notify_approval_once(&self, app: &AppHandle) {
         if !self.approval_notified.swap(true, Ordering::SeqCst) {
             notify(app, &Notification::approval_needed());
@@ -396,13 +428,88 @@ pub fn sync_tray(app: &AppHandle) {
 pub fn show_main(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+    let closing = app.state::<Ctx>().closing.load(Ordering::SeqCst);
+    match app.get_webview_window(MAIN_WINDOW) {
+        Some(window) if window_usable(true, closing) => {
+            reveal(&window);
+            emit_window_chrome(app);
+        }
+        _ => {
+            tauri::async_runtime::spawn(build_main(app.clone()));
+        }
     }
-    emit_window_chrome(app);
     tauri::async_runtime::spawn(refresh(app.clone()));
+}
+
+fn window_usable(exists: bool, closing: bool) -> bool {
+    exists && !closing
+}
+
+pub fn main_window_destroyed(app: &AppHandle) {
+    app.state::<Ctx>().closing.store(false, Ordering::SeqCst);
+}
+
+fn creation_failed(app: &AppHandle) {
+    let tray_ok = app.state::<Ctx>().tray_ok.load(Ordering::Relaxed);
+    if !tray_ok {
+        app.exit(1);
+    } else {
+        #[cfg(target_os = "macos")]
+        let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    }
+}
+
+fn reveal(window: &tauri::WebviewWindow) {
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+// Building a webview window inside a synchronous handler deadlocks on Windows (WebView2).
+async fn build_main(app: AppHandle) {
+    let ctx = app.state::<Ctx>();
+    let _building = ctx.window_build.lock().await;
+    for _ in 0..100 {
+        let closing = ctx.closing.load(Ordering::SeqCst);
+        if !closing || app.get_webview_window(MAIN_WINDOW).is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let window = match app.get_webview_window(MAIN_WINDOW) {
+        Some(window) if !ctx.closing.load(Ordering::SeqCst) => window,
+        Some(_) => {
+            tracing::warn!("main window is still closing");
+            creation_failed(&app);
+            return;
+        }
+        None => {
+            ctx.closing.store(false, Ordering::SeqCst);
+            let Some(config) = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|window| window.label == MAIN_WINDOW)
+                .cloned()
+            else {
+                creation_failed(&app);
+                return;
+            };
+            match tauri::WebviewWindowBuilder::from_config(&app, &config)
+                .and_then(|builder| builder.build())
+            {
+                Ok(window) => window,
+                Err(error) => {
+                    tracing::warn!("main window creation failed: {error}");
+                    creation_failed(&app);
+                    return;
+                }
+            }
+        }
+    };
+    reveal(&window);
+    emit_window_chrome(&app);
 }
 
 fn emit_window_chrome(app: &AppHandle) {
@@ -419,13 +526,22 @@ fn emit_window_chrome(app: &AppHandle) {
 
 #[cfg(target_os = "macos")]
 pub fn show_licenses(app: &AppHandle) {
+    app.state::<Ctx>()
+        .push_window_request(WindowRequest::Licenses);
     show_main(app);
     let _ = app.emit(LICENSES_CHANNEL, ());
 }
 
+// Destroying rather than hiding frees the WebKit helper processes while the app sits in the tray.
 pub fn hide_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-        let _ = window.hide();
+        let ctx = app.state::<Ctx>();
+        ctx.take_window_requests();
+        ctx.closing.store(true, Ordering::SeqCst);
+        if window.destroy().is_err() {
+            ctx.closing.store(false, Ordering::SeqCst);
+            let _ = window.hide();
+        }
     }
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -978,5 +1094,54 @@ mod tests {
             Some("p".into())
         );
         assert_eq!(ctx.take_startup_notice(), None);
+    }
+
+    #[test]
+    fn a_closing_window_is_not_usable() {
+        assert!(window_usable(true, false));
+        assert!(!window_usable(true, true));
+        assert!(!window_usable(false, false));
+        assert!(!window_usable(false, true));
+    }
+
+    #[test]
+    fn window_requests_drain_in_order() {
+        let ctx = ctx();
+        ctx.push_window_request(WindowRequest::Licenses);
+        ctx.push_window_request(WindowRequest::UpdatePrompt {
+            outcome: "available",
+        });
+        assert_eq!(
+            ctx.take_window_requests(),
+            vec![
+                WindowRequest::Licenses,
+                WindowRequest::UpdatePrompt {
+                    outcome: "available"
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn window_requests_are_empty_after_a_take() {
+        let ctx = ctx();
+        ctx.push_window_request(WindowRequest::Licenses);
+        ctx.take_window_requests();
+        assert!(ctx.take_window_requests().is_empty());
+    }
+
+    #[test]
+    fn window_requests_serialize_with_a_kind_tag() {
+        assert_eq!(
+            serde_json::to_string(&WindowRequest::Licenses).unwrap(),
+            r#"{"kind":"licenses"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&WindowRequest::UpdatePrompt {
+                outcome: "available"
+            })
+            .unwrap(),
+            r#"{"kind":"update_prompt","outcome":"available"}"#
+        );
     }
 }

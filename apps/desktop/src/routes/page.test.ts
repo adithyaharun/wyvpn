@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/svelte";
+import { tick } from "svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ConnectionStatus, StartupNotice, UpdateState } from "$lib/types";
+import type { ConnectionStatus, StartupNotice, UpdateState, WindowRequest } from "$lib/types";
 import { updates } from "$lib/update.svelte";
 
 const invoke = vi.hoisted(() => vi.fn());
@@ -14,6 +15,35 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 import Page from "./+page.svelte";
+
+let windowRequests: WindowRequest[] = [];
+
+function emit(name: string, payload: unknown = null) {
+  const handler = handlers.get(name);
+  if (!handler) throw new Error(`no listener for ${name}`);
+  handler({ payload });
+}
+
+function wake(name: string, ...requests: WindowRequest[]) {
+  windowRequests.push(...requests);
+  emit(name);
+}
+
+function drains() {
+  return invoke.mock.calls.filter(([command]) => command === "take_window_requests").length;
+}
+
+async function drained(count: number) {
+  await vi.waitFor(() => expect(drains()).toBe(count));
+  const last = invoke.mock.calls.map(([command]) => command).lastIndexOf("take_window_requests");
+  await invoke.mock.results[last]?.value;
+  await new Promise((resolve) => setTimeout(resolve));
+  await tick();
+}
+
+beforeEach(() => {
+  windowRequests = [];
+});
 
 const message = "Your default profile was removed, so WyVPN didn't connect automatically. Choose another in Settings.";
 
@@ -35,6 +65,12 @@ function backend(stored: StartupNotice | null, available = true) {
         return "granted";
       case "session_log":
         return { profile_id: null, lines: [] };
+      case "take_window_requests":
+        return windowRequests.splice(0);
+      case "third_party_licenses":
+        return "MIT License text";
+      case "openvpn_notice":
+        return { license: "GPL-2.0", source_url: null };
       default:
         return null;
     }
@@ -145,6 +181,54 @@ describe("toolbar", () => {
   });
 });
 
+describe("window requests", () => {
+  const licenses = { name: "Third-party licenses" };
+
+  beforeEach(() => {
+    handlers.clear();
+    invoke.mockReset();
+  });
+
+  it("opens the licenses panel for a request queued before mount", async () => {
+    backend(null);
+    windowRequests.push({ kind: "licenses" });
+    render(Page);
+
+    expect(await screen.findByRole("dialog", licenses)).toBeInTheDocument();
+    expect(windowRequests).toEqual([]);
+  });
+
+  it("opens no panel when the queue is empty at mount", async () => {
+    backend(null);
+    render(Page);
+
+    await drained(1);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("drains the queue and opens the licenses panel on the menu event", async () => {
+    backend(null);
+    render(Page);
+    await drained(1);
+
+    wake("app://open-licenses", { kind: "licenses" });
+
+    expect(await screen.findByRole("dialog", licenses)).toBeInTheDocument();
+    expect(drains()).toBe(2);
+  });
+
+  it("ignores the menu event when the queue is empty", async () => {
+    backend(null);
+    render(Page);
+    await drained(1);
+
+    emit("app://open-licenses");
+
+    await drained(2);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
 describe("updates", () => {
   const offer: UpdateState = {
     state: "available",
@@ -180,16 +264,12 @@ describe("updates", () => {
           return state;
         case "dismiss_update":
           return { ...offer, state: "dismissed" };
+        case "take_window_requests":
+          return windowRequests.splice(0);
         default:
           return null;
       }
     });
-  }
-
-  function emit(name: string, payload: unknown) {
-    const handler = handlers.get(name);
-    if (!handler) throw new Error(`no listener for ${name}`);
-    handler({ payload });
   }
 
   async function ready() {
@@ -211,16 +291,47 @@ describe("updates", () => {
     await ready();
     expect(screen.queryByRole("dialog", { name: "Software update" })).toBeNull();
 
-    emit("app://update-prompt", { outcome: "available" });
+    wake("app://update-prompt", { kind: "update_prompt", outcome: "available" });
     expect(await screen.findByRole("dialog", { name: "Software update" })).toBeInTheDocument();
     expect(screen.getByText("WyVPN 0.2.9 is available")).toBeInTheDocument();
+  });
+
+  it("drains the queue and opens the update prompt on the prompt event", async () => {
+    updateBackend({ ...offer, version: "0.2.9", state: "dismissed" });
+    await ready();
+
+    wake("app://update-prompt", { kind: "update_prompt", outcome: "available" });
+
+    expect(await screen.findByRole("dialog", { name: "Software update" })).toBeInTheDocument();
+    expect(invoke).toHaveBeenCalledWith("take_window_requests", undefined);
+    expect(windowRequests).toEqual([]);
+  });
+
+  it("opens the update prompt for a request queued before mount", async () => {
+    updateBackend({ ...offer, version: "0.2.9", state: "dismissed" });
+    windowRequests.push({ kind: "update_prompt", outcome: "available" });
+    render(Page);
+
+    expect(await screen.findByRole("dialog", { name: "Software update" })).toBeInTheDocument();
+    expect(screen.getByText("WyVPN 0.2.9 is available")).toBeInTheDocument();
+  });
+
+  it("ignores the prompt event payload when the queue is empty", async () => {
+    updateBackend({ ...offer, version: "0.2.9", state: "dismissed" });
+    await ready();
+    await drained(1);
+
+    emit("app://update-prompt", { outcome: "available" });
+
+    await drained(2);
+    expect(screen.queryByRole("dialog", { name: "Software update" })).toBeNull();
   });
 
   it("shows that WyVPN is up to date after a menu check", async () => {
     updateBackend({ state: "idle" });
     await ready();
     emit("app://update", { state: "up_to_date" });
-    emit("app://update-prompt", { outcome: "up_to_date" });
+    wake("app://update-prompt", { kind: "update_prompt", outcome: "up_to_date" });
     expect(await screen.findByText("WyVPN is up to date")).toBeInTheDocument();
   });
 
@@ -228,7 +339,7 @@ describe("updates", () => {
     updateBackend({ state: "idle" });
     await ready();
     emit("app://update", { state: "failed", message: "Could not reach the update server." });
-    emit("app://update-prompt", { outcome: "failed" });
+    wake("app://update-prompt", { kind: "update_prompt", outcome: "failed" });
     const dialog = await screen.findByRole("dialog", { name: "Software update" });
     expect(within(dialog).getByRole("alert")).toHaveTextContent("Could not reach the update server.");
     expect(within(dialog).getByRole("button", { name: "Check again" })).toBeInTheDocument();
@@ -251,7 +362,7 @@ describe("updates", () => {
     const trigger = screen.getByRole("button", { name: "Settings" });
     trigger.focus();
 
-    emit("app://update-prompt", { outcome: "available" });
+    wake("app://update-prompt", { kind: "update_prompt", outcome: "available" });
     const dialog = await screen.findByRole("dialog", { name: "Software update" });
     const install = within(dialog).getByRole("button", { name: "Install" });
     install.focus();

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The desktop app uses much less memory while it sits in the tray. The window is released when you close it and built again when you open it, so a hidden start at login on macOS drops from about 72 MB to 12 MB. Opening the window can take a fraction of a second longer.
+
+### Fixed
+
+- Opening WyVPN again from Finder, Spotlight, Launchpad or the Dock on macOS shows its window instead of doing nothing.
+
 ## [0.1.3] - 2026-10-21
 
 WyVPN can now connect over WireGuard and update itself. Install this version by hand once; later versions update from inside the app.

@@ -14,7 +14,7 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::error::CmdError;
 use crate::notifications::Notification;
-use crate::shell::{self, Ctx};
+use crate::shell::{self, Ctx, WindowRequest};
 
 pub use state::{Event, Found, Offer, UpdateState};
 use state::{Machine, Rejected};
@@ -158,11 +158,15 @@ fn prompt_outcome(state: &UpdateState) -> Option<&'static str> {
     }
 }
 
+fn queued_prompt(prompt: bool, state: &UpdateState) -> Option<&'static str> {
+    prompt.then(|| prompt_outcome(state)).flatten()
+}
+
 pub fn current_state(app: &AppHandle) -> UpdateState {
     app.state::<Ctx>().updater.state()
 }
 
-pub async fn check(app: &AppHandle, manual: bool) -> Result<UpdateState, CmdError> {
+pub async fn check(app: &AppHandle, manual: bool, prompt: bool) -> Result<UpdateState, CmdError> {
     let ctx = app.state::<Ctx>();
     transition(app, Event::BeginCheck).map_err(rejection)?;
     let event = match lookup(app).await {
@@ -185,7 +189,8 @@ pub async fn check(app: &AppHandle, manual: bool) -> Result<UpdateState, CmdErro
         ctx.updater.record_success(now_secs());
     }
     if manual {
-        if let Some(outcome) = prompt_outcome(&state) {
+        if let Some(outcome) = queued_prompt(prompt, &state) {
+            ctx.push_window_request(WindowRequest::UpdatePrompt { outcome });
             let _ = app.emit(PROMPT_CHANNEL, Prompt { outcome });
         }
     } else if let UpdateState::Available(offer) = &state {
@@ -219,7 +224,7 @@ pub fn check_from_menu(app: &AppHandle) {
     shell::show_main(app);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = check(&app, true).await {
+        if let Err(error) = check(&app, true, true).await {
             tracing::warn!("manual update check rejected: {}", error.message);
         }
     });
@@ -229,6 +234,10 @@ pub fn install_from_menu(app: &AppHandle) {
     let state = current_state(app);
     match state.offer() {
         Some(offer) if offer.installable => {
+            app.state::<Ctx>()
+                .push_window_request(WindowRequest::UpdatePrompt {
+                    outcome: "available",
+                });
             shell::show_main(app);
             let _ = app.emit(
                 PROMPT_CHANNEL,
@@ -266,7 +275,7 @@ pub async fn schedule(app: AppHandle) {
 }
 
 async fn automatic_check(app: &AppHandle) {
-    if let Err(error) = check(app, false).await {
+    if let Err(error) = check(app, false, false).await {
         tracing::warn!("automatic update check skipped: {}", error.message);
     }
 }
@@ -675,6 +684,15 @@ mod tests {
         assert!(updater.plan_notification(false, false, "0.2.0").is_none());
         assert!(updater.plan_notification(true, true, "0.2.0").is_none());
         assert!(updater.plan_notification(true, false, "0.2.0").is_some());
+    }
+
+    #[test]
+    fn in_window_checks_queue_no_prompt() {
+        assert_eq!(queued_prompt(false, &UpdateState::UpToDate), None);
+        assert_eq!(
+            queued_prompt(true, &UpdateState::UpToDate),
+            Some("up_to_date")
+        );
     }
 
     #[test]

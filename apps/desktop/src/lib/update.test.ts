@@ -40,8 +40,9 @@ async function started(initial: UpdateState = { state: "idle" }) {
   invoke.mockImplementation(async (command: string) => (command === "update_state" ? initial : null));
   const store = new UpdateStore();
   const stop = store.start();
-  await vi.waitFor(() => expect(handlers.has("app://update-prompt")).toBe(true));
+  await vi.waitFor(() => expect(handlers.has("app://update")).toBe(true));
   await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("update_state", undefined));
+  await vi.waitFor(() => expect(store.state).toEqual(initial));
   return { store, stop };
 }
 
@@ -204,10 +205,9 @@ describe("UpdateStore", () => {
     stop();
   });
 
-  it("opens for prompts from the tray or app menu", async () => {
+  it("prompt() opens the sheet", async () => {
     const { store, stop } = await started();
-    emit("app://update", { state: "up_to_date" });
-    emit("app://update-prompt", { outcome: "up_to_date" });
+    store.prompt();
     expect(store.open).toBe(true);
     stop();
   });
@@ -217,7 +217,6 @@ describe("UpdateStore", () => {
     invoke.mockImplementation(async (command: string) => {
       if (command !== "check_for_updates") return null;
       emit("app://update", { state: "up_to_date" });
-      emit("app://update-prompt", { outcome: "up_to_date" });
       return { state: "up_to_date" };
     });
     await store.check();
@@ -227,7 +226,6 @@ describe("UpdateStore", () => {
     invoke.mockImplementation(async (command: string) => {
       if (command !== "check_for_updates") return null;
       emit("app://update", available);
-      emit("app://update-prompt", { outcome: "available" });
       return available;
     });
     await store.check();
@@ -235,7 +233,20 @@ describe("UpdateStore", () => {
     stop();
   });
 
-  it("shows a rejected check without swallowing the next prompt", async () => {
+  it("opens for a menu check prompt that arrives after its own check", async () => {
+    const { store, stop } = await started();
+    invoke.mockImplementation(async (command: string) =>
+      command === "check_for_updates" ? { state: "up_to_date" } : null,
+    );
+    await store.check();
+    expect(store.open).toBe(false);
+
+    store.prompt();
+    expect(store.open).toBe(true);
+    stop();
+  });
+
+  it("shows a rejected check inline", async () => {
     const { store, stop } = await started();
     invoke.mockImplementation(async (command: string) => {
       if (command === "check_for_updates") throw { code: "invalid_request", message: "an update is already in progress" };
@@ -243,9 +254,7 @@ describe("UpdateStore", () => {
     });
     await store.check();
     expect(store.error).toBe("an update is already in progress");
-
-    emit("app://update-prompt", { outcome: "failed" });
-    expect(store.open).toBe(true);
+    expect(store.open).toBe(false);
     stop();
   });
 

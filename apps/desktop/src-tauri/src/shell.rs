@@ -459,6 +459,20 @@ fn creation_failed(app: &AppHandle) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn platform_chrome<'a>(
+    builder: tauri::WebviewWindowBuilder<'a, tauri::Wry, AppHandle>,
+) -> tauri::WebviewWindowBuilder<'a, tauri::Wry, AppHandle> {
+    builder.decorations(false).shadow(true)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_chrome<'a>(
+    builder: tauri::WebviewWindowBuilder<'a, tauri::Wry, AppHandle>,
+) -> tauri::WebviewWindowBuilder<'a, tauri::Wry, AppHandle> {
+    builder
+}
+
 fn reveal(window: &tauri::WebviewWindow) {
     let _ = window.unminimize();
     let _ = window.show();
@@ -497,6 +511,7 @@ async fn build_main(app: AppHandle) {
                 return;
             };
             match tauri::WebviewWindowBuilder::from_config(&app, &config)
+                .map(platform_chrome)
                 .and_then(|builder| builder.build())
             {
                 Ok(window) => window,

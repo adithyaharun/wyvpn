@@ -46,6 +46,11 @@
   --sheet-top: 40px;
 }
 
+:root[data-platform="windows"] {
+  --sheet-top: var(--toolbar);
+  --caption-width: 92px;
+}
+
 *,
 *::before,
 *::after {

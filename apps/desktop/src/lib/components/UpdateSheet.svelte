@@ -4,6 +4,7 @@
   import { tick } from "svelte";
   import type { Attachment } from "svelte/attachments";
   import { formatProgress, formatReleaseDate, offerOf, progressPercent, updates } from "$lib/update.svelte";
+  import { detectPlatform } from "$lib/window";
   import Sheet from "./Sheet.svelte";
 
   interface Props {
@@ -13,7 +14,7 @@
   let { vpnActive }: Props = $props();
 
   const id = $props.id();
-  const windows = typeof navigator !== "undefined" && /Windows/.test(navigator.userAgent);
+  const windows = detectPlatform() === "windows";
 
   const current = $derived(updates.state);
   const offer = $derived(offerOf(current));

@@ -230,4 +230,22 @@ mod tests {
                 .any(|p| p == "core:window:allow-internal-toggle-maximize")
         );
     }
+
+    #[test]
+    fn caption_buttons_are_allowed_on_windows_only() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/windows.json")).unwrap();
+        assert_eq!(capability["platforms"], serde_json::json!(["windows"]));
+        assert_eq!(capability["windows"], serde_json::json!(["main"]));
+        let permissions = capability["permissions"].as_array().unwrap();
+        for permission in ["core:window:allow-minimize", "core:window:allow-close"] {
+            assert!(permissions.iter().any(|p| p == permission), "{permission}");
+        }
+        let default: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let shared = default["permissions"].as_array().unwrap();
+        for permission in ["core:window:allow-minimize", "core:window:allow-close"] {
+            assert!(!shared.iter().any(|p| p == permission), "{permission}");
+        }
+    }
 }

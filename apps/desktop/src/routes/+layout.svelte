@@ -1,8 +1,9 @@
 <script lang="ts">
   import "../app.css";
   import Toaster from "$lib/components/Toaster.svelte";
+  import WindowControls from "$lib/components/WindowControls.svelte";
   import { toasts } from "$lib/toast.svelte";
-  import { dragWindow } from "$lib/window";
+  import { detectPlatform, dragWindow } from "$lib/window";
 
   let { children } = $props();
 </script>
@@ -16,6 +17,9 @@
       <p class="selectable">This view couldn't be shown.</p>
       <button class="btn btn-secondary" type="button" onclick={reset}>Try again</button>
     </div>
+    {#if detectPlatform() === "windows"}
+      <WindowControls modal={false} />
+    {/if}
   {/snippet}
 </svelte:boundary>
 

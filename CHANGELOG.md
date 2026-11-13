@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The desktop app uses much less memory while it sits in the tray. The window is released when you close it and built again when you open it, so a hidden start at login on macOS drops from about 72 MB to 12 MB. Opening the window can take a fraction of a second longer.
+- On Windows the window no longer has a separate title bar. The toolbar moves the window and has its own minimize and close buttons, matching the macOS layout.
 
 ### Fixed
 

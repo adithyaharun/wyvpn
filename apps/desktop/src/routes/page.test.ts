@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, within } from "@testing-library/svelte";
 import { tick } from "svelte";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionStatus, StartupNotice, UpdateState, WindowRequest } from "$lib/types";
 import { updates } from "$lib/update.svelte";
 
@@ -178,6 +178,101 @@ describe("toolbar", () => {
     expect(screen.queryByRole("navigation")).toBeNull();
     expect(screen.getAllByRole("button", { name: "Connection log" })).toHaveLength(1);
     expect(screen.getAllByRole("button", { name: "Settings" })).toHaveLength(1);
+  });
+});
+
+describe("window controls", () => {
+  const userAgents = {
+    windows: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/130.0.0.0",
+    mac: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+    linux: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15",
+  };
+
+  async function renderOn(platform: keyof typeof userAgents) {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(userAgents[platform]);
+    backend(null);
+    const view = render(Page);
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "Connection log" })).toBeEnabled());
+    return view;
+  }
+
+  const controls = () => screen.queryByRole("group", { name: "Window controls" });
+  const dragStrip = (container: HTMLElement) => container.querySelector(".drag-strip");
+  const calls = (command: string) => invoke.mock.calls.filter(([name]) => name === command);
+
+  beforeEach(() => {
+    handlers.clear();
+    invoke.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete document.documentElement.dataset.platform;
+  });
+
+  it("marks the root as Windows", async () => {
+    await renderOn("windows");
+    expect(document.documentElement.dataset.platform).toBe("windows");
+  });
+
+  it("shows minimize and close on Windows", async () => {
+    await renderOn("windows");
+    const group = controls()!;
+    for (const name of ["Minimize", "Close"]) {
+      const button = within(group).getByRole("button", { name });
+      expect(button).toHaveAttribute("title", name);
+      expect(button.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    }
+  });
+
+  it("shows no caption buttons on macOS", async () => {
+    await renderOn("mac");
+    expect(document.documentElement.dataset.platform).toBe("mac");
+    expect(controls()).toBeNull();
+  });
+
+  it("shows no caption buttons on Linux", async () => {
+    await renderOn("linux");
+    expect(document.documentElement.dataset.platform).toBeUndefined();
+    expect(controls()).toBeNull();
+  });
+
+  it("minimizes and closes the window", async () => {
+    await renderOn("windows");
+    await fireEvent.click(within(controls()!).getByRole("button", { name: "Minimize" }));
+    expect(calls("plugin:window|minimize")).toEqual([["plugin:window|minimize", { label: "main" }]]);
+    await fireEvent.click(within(controls()!).getByRole("button", { name: "Close" }));
+    expect(calls("plugin:window|close")).toEqual([["plugin:window|close", { label: "main" }]]);
+  });
+
+  it("keeps the caption buttons usable while a sheet is open", async () => {
+    await renderOn("windows");
+    await fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+
+    const close = within(controls()!).getByRole("button", { name: "Close" });
+    expect(close.closest("[inert]")).toBeNull();
+    close.focus();
+    expect(close).toHaveFocus();
+    await fireEvent.click(close);
+    expect(calls("plugin:window|close")).toHaveLength(1);
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+  });
+
+  it("drags the window from the toolbar strip while a sheet is open", async () => {
+    const { container } = await renderOn("windows");
+    await fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    const strip = dragStrip(container)!;
+    expect(strip).toHaveAttribute("data-tauri-drag-region");
+    expect(strip.closest("[inert]")).toBeNull();
+    await fireEvent.mouseDown(strip, { button: 0 });
+    expect(calls("plugin:window|start_dragging")).toEqual([["plugin:window|start_dragging", { label: "main" }]]);
+  });
+
+  it("has no drag strip without a sheet", async () => {
+    const { container } = await renderOn("windows");
+    expect(dragStrip(container)).toBeNull();
   });
 });
 

@@ -57,6 +57,10 @@
     cursor: default;
   }
 
+  :global(:root[data-platform="windows"]) .toolbar {
+    padding-right: calc(var(--caption-width) + 8px);
+  }
+
   .name {
     color: var(--muted);
     font-size: 13px;

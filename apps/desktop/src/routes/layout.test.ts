@@ -28,4 +28,22 @@ describe("layout error boundary", () => {
     await fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("Recovered")).toBeInTheDocument();
   });
+
+  it.each([
+    ["Windows NT 10.0; Win64; x64", true],
+    ["Macintosh; Intel Mac OS X 10_15_7", false],
+  ])("offers caption buttons in the failed view for %s: %s", async (agent, shown) => {
+    const userAgent = vi.spyOn(navigator, "userAgent", "get").mockReturnValue(`Mozilla/5.0 (${agent})`);
+    const children = createRawSnippet(() => ({
+      render: () => {
+        throw new Error("view broke");
+      },
+    }));
+    render(Layout, { children });
+
+    expect(await screen.findByText("This view couldn't be shown.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Close" }) !== null).toBe(shown);
+    expect(screen.queryByRole("button", { name: "Minimize" }) !== null).toBe(shown);
+    userAgent.mockRestore();
+  });
 });

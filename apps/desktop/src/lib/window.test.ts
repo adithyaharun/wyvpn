@@ -11,7 +11,14 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 
-import { applyWindowChrome, toolbarChrome, watchWindowChrome } from "./window";
+import {
+  applyWindowChrome,
+  closeWindow,
+  detectPlatform,
+  minimizeWindow,
+  toolbarChrome,
+  watchWindowChrome,
+} from "./window";
 
 const VARS = ["--toolbar-pad-top", "--toolbar-pad-bottom", "--toolbar-inset"];
 
@@ -23,6 +30,38 @@ function vars() {
 function clearVars() {
   for (const name of VARS) document.documentElement.style.removeProperty(name);
 }
+
+describe("detectPlatform", () => {
+  it("detects macOS", () => {
+    expect(detectPlatform("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15")).toBe("mac");
+  });
+
+  it("detects Windows", () => {
+    expect(detectPlatform("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/130.0.0.0")).toBe(
+      "windows",
+    );
+  });
+
+  it("treats Linux as other", () => {
+    expect(detectPlatform("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15")).toBe("other");
+  });
+});
+
+describe("window commands", () => {
+  beforeEach(() => invoke.mockReset());
+
+  it("minimizes the main window", () => {
+    invoke.mockResolvedValue(undefined);
+    minimizeWindow();
+    expect(invoke).toHaveBeenCalledWith("plugin:window|minimize", { label: "main" });
+  });
+
+  it("closes the main window through the close request", () => {
+    invoke.mockResolvedValue(undefined);
+    closeWindow();
+    expect(invoke).toHaveBeenCalledWith("plugin:window|close", { label: "main" });
+  });
+});
 
 describe("toolbarChrome", () => {
   it("lifts the content for old-style buttons", () => {

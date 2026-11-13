@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "windows-caption",
+  "description": "Caption buttons for the frameless main window on Windows",
+  "platforms": ["windows"],
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:window:allow-minimize",
+    "core:window:allow-close"
+  ]
+}

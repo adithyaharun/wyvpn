@@ -3,8 +3,25 @@ import { listen } from "@tauri-apps/api/event";
 
 const INTERACTIVE = "button, input, select, textarea, a, [role='button']";
 
+export type Platform = "mac" | "windows" | "other";
+
+export function detectPlatform(userAgent = typeof navigator === "undefined" ? "" : navigator.userAgent): Platform {
+  if (/Mac/.test(userAgent)) return "mac";
+  if (/Windows/.test(userAgent)) return "windows";
+  return "other";
+}
+
 export function startWindowDrag(): void {
   invoke("plugin:window|start_dragging", { label: "main" }).catch(() => {});
+}
+
+export function minimizeWindow(): void {
+  invoke("plugin:window|minimize", { label: "main" }).catch(() => {});
+}
+
+// Goes through CloseRequested so the backend decides between tray and quit.
+export function closeWindow(): void {
+  invoke("plugin:window|close", { label: "main" }).catch(() => {});
 }
 
 export function dragWindow(event: MouseEvent): void {

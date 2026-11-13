@@ -17,10 +17,11 @@
   import StatusPanel from "$lib/components/StatusPanel.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import UpdateSheet from "$lib/components/UpdateSheet.svelte";
+  import WindowControls from "$lib/components/WindowControls.svelte";
   import { daemon, isActive } from "$lib/daemon.svelte";
   import { describeError } from "$lib/errors";
   import { PROMPT_CHANNEL, updates } from "$lib/update.svelte";
-  import { watchWindowChrome } from "$lib/window";
+  import { detectPlatform, watchWindowChrome } from "$lib/window";
   import { drainWindowRequests } from "$lib/window-requests";
 
   type Panel = "import" | "settings" | "log" | "licenses";
@@ -36,9 +37,10 @@
     pending ? (daemon.profiles.find((p) => p.id === pending.profileId)?.name ?? "") : "",
   );
 
-  if (typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent)) {
-    document.documentElement.dataset.platform = "mac";
-  }
+  const modal = $derived(panel !== null || pending !== null || updates.open);
+
+  const platform = detectPlatform();
+  if (platform !== "other") document.documentElement.dataset.platform = platform;
 
   onMount(() => {
     const stop = daemon.start();
@@ -75,7 +77,7 @@
   });
 </script>
 
-<div class="app" inert={panel !== null || pending !== null || updates.open}>
+<div class="app" inert={modal}>
   <Toolbar
     available={daemon.available}
     onimport={() => (panel = "import")}
@@ -147,6 +149,10 @@
   {#key `${pending.profileId}:${pending.mode}`}
     <PinDialog profileId={pending.profileId} profileName={pendingName} mode={pending.mode} />
   {/key}
+{/if}
+
+{#if platform === "windows"}
+  <WindowControls {modal} />
 {/if}
 
 <style>

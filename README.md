@@ -4,7 +4,7 @@ Alternative Pritunl or OpenVPN client, written in Rust for the backend, wrapped 
 
 ## Motivation
 
-I hate having a VPN client that takes horrendous amount of disk space, and I hope this should be faster because it's written in Rust.
+I hate having a VPN client that takes horrendous amount of disk space, and I hope this should be faster because it's written in Rust (I think).
 
 ## BEGIN LLM LINE
 

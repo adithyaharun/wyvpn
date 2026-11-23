@@ -29,6 +29,7 @@
     "allow-get-launch-at-login",
     "allow-set-launch-at-login",
     "allow-take-startup-notice",
+    "allow-take-window-requests",
     "allow-app-info",
     "allow-open-support",
     "allow-service-status",

@@ -19,7 +19,7 @@ use crate::files::read_import_file;
 use crate::model::AvailabilityPayload;
 use crate::service::{self, ServiceStatus};
 use crate::settings::Settings;
-use crate::shell::{self, Ctx, StartupNotice};
+use crate::shell::{self, Ctx, StartupNotice, WindowRequest};
 use crate::updater::{self, UpdateState};
 
 type CmdResult<T> = Result<T, CmdError>;
@@ -183,6 +183,11 @@ pub async fn session_log(ctx: State<'_, Ctx>) -> CmdResult<SessionLogReply> {
 #[tauri::command]
 pub fn take_startup_notice(ctx: State<'_, Ctx>) -> Option<StartupNotice> {
     ctx.take_startup_notice()
+}
+
+#[tauri::command]
+pub fn take_window_requests(ctx: State<'_, Ctx>) -> Vec<WindowRequest> {
+    ctx.take_window_requests()
 }
 
 #[tauri::command]
@@ -367,7 +372,7 @@ pub async fn update_state(app: AppHandle) -> UpdateState {
 
 #[tauri::command]
 pub async fn check_for_updates(app: AppHandle) -> CmdResult<UpdateState> {
-    updater::check(&app, true).await
+    updater::check(&app, true, false).await
 }
 
 #[tauri::command]

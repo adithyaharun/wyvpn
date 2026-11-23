@@ -18,6 +18,7 @@ const COMMANDS: &[&str] = &[
     "get_launch_at_login",
     "set_launch_at_login",
     "take_startup_notice",
+    "take_window_requests",
     "app_info",
     "open_support",
     "service_status",

@@ -2,7 +2,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { api } from "./api";
 import { describeError, toCommandError } from "./errors";
 import { formatBytes } from "./format";
-import type { UpdateOffer, UpdatePrompt, UpdateState } from "./types";
+import type { UpdateOffer, UpdateState } from "./types";
 
 export const UPDATE_CHANNEL = "app://update";
 export const PROMPT_CHANNEL = "app://update-prompt";
@@ -70,8 +70,6 @@ export class UpdateStore {
   error = $state.raw<string | null>(null);
 
   #seq = 0;
-  // Manual checks started here show their result inline, so only "available" opens the sheet.
-  #quietPrompts = 0;
   #undismissed: string | null = null;
   #declined: string | null = null;
 
@@ -90,17 +88,14 @@ export class UpdateStore {
       if (document.visibilityState !== "hidden") void this.refresh();
     };
 
-    Promise.all([
-      listen<UpdateState>(UPDATE_CHANNEL, ({ payload }) => {
-        this.#seq++;
-        this.#apply(payload);
-      }),
-      listen<UpdatePrompt>(PROMPT_CHANNEL, ({ payload }) => this.#prompt(payload)),
-    ])
-      .then((subscriptions) => {
-        if (disposed) subscriptions.forEach((off) => off());
-        else unlisteners.push(...subscriptions);
-        if (!disposed) void this.refresh();
+    listen<UpdateState>(UPDATE_CHANNEL, ({ payload }) => {
+      this.#seq++;
+      this.#apply(payload);
+    })
+      .then((off) => {
+        if (disposed) return off();
+        unlisteners.push(off);
+        void this.refresh();
       })
       .catch(() => {});
     window.addEventListener("focus", onShown);
@@ -125,13 +120,11 @@ export class UpdateStore {
   async check(): Promise<void> {
     if (this.busy) return;
     this.error = null;
-    this.#quietPrompts++;
     const seq = this.#seq;
     try {
       const next = await api.checkForUpdates();
       if (seq === this.#seq) this.#apply(next);
     } catch (raw) {
-      this.#quietPrompts = Math.max(0, this.#quietPrompts - 1);
       this.#fail(raw);
     }
   }
@@ -196,10 +189,8 @@ export class UpdateStore {
     }
   }
 
-  #prompt({ outcome }: UpdatePrompt): void {
-    const quiet = this.#quietPrompts > 0;
-    if (quiet) this.#quietPrompts--;
-    if (outcome === "available" || !quiet) this.open = true;
+  prompt(): void {
+    this.open = true;
   }
 
   #fail(raw: unknown): void {

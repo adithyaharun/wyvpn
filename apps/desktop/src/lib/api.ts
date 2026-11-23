@@ -14,6 +14,7 @@ import type {
   SupportTarget,
   Transport,
   UpdateState,
+  WindowRequest,
 } from "./types";
 
 async function call<T>(command: string, args?: InvokeArgs): Promise<T> {
@@ -47,6 +48,7 @@ export const api = {
   getLaunchAtLogin: () => call<boolean>("get_launch_at_login"),
   setLaunchAtLogin: (enabled: boolean) => call<boolean>("set_launch_at_login", { enabled }),
   takeStartupNotice: () => call<StartupNotice | null>("take_startup_notice"),
+  takeWindowRequests: () => call<WindowRequest[]>("take_window_requests"),
   appInfo: () => call<AppInfo>("app_info"),
   serviceStatus: () => call<ServiceStatus | null>("service_status"),
   registerService: () => call<ServiceStatus>("register_service"),

@@ -19,8 +19,9 @@
   import UpdateSheet from "$lib/components/UpdateSheet.svelte";
   import { daemon, isActive } from "$lib/daemon.svelte";
   import { describeError } from "$lib/errors";
-  import { updates } from "$lib/update.svelte";
+  import { PROMPT_CHANNEL, updates } from "$lib/update.svelte";
   import { watchWindowChrome } from "$lib/window";
+  import { drainWindowRequests } from "$lib/window-requests";
 
   type Panel = "import" | "settings" | "log" | "licenses";
   let panel = $state<Panel | null>(null);
@@ -43,15 +44,30 @@
     const stop = daemon.start();
     const stopUpdates = updates.start();
     const stopChrome = watchWindowChrome();
-    let unlisten: UnlistenFn | undefined;
+    const unlisteners: UnlistenFn[] = [];
     let disposed = false;
-    listen("app://open-licenses", () => (panel = "licenses")).then((off) => {
-      if (disposed) off();
-      else unlisten = off;
-    });
+    const drain = () =>
+      drainWindowRequests({
+        licenses: () => {
+          if (!disposed) panel = "licenses";
+        },
+        updatePrompt: () => {
+          if (!disposed) updates.prompt();
+        },
+      });
+    void Promise.allSettled([listen("app://open-licenses", drain), listen(PROMPT_CHANNEL, drain)]).then(
+      (results) => {
+        for (const result of results) {
+          if (result.status !== "fulfilled") continue;
+          if (disposed) result.value();
+          else unlisteners.push(result.value);
+        }
+        if (!disposed) void drain();
+      },
+    );
     return () => {
       disposed = true;
-      unlisten?.();
+      unlisteners.forEach((off) => off());
       stopChrome();
       stopUpdates();
       stop();

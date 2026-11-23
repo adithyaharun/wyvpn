@@ -63,6 +63,10 @@ fn build_tray(app: &tauri::AppHandle) -> bool {
     }
 }
 
+fn keeps_running(code: Option<i32>, tray_ok: bool) -> bool {
+    code.is_none() && tray_ok
+}
+
 pub fn run() {
     let builder =
         tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _, _| {
@@ -99,6 +103,7 @@ pub fn run() {
             commands::get_launch_at_login,
             commands::set_launch_at_login,
             commands::take_startup_notice,
+            commands::take_window_requests,
             commands::app_info,
             commands::open_support,
             commands::service_status,
@@ -119,6 +124,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() != MAIN_WINDOW {
                 return;
+            }
+            if matches!(event, WindowEvent::Destroyed) {
+                shell::main_window_destroyed(window.app_handle());
             }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
@@ -159,15 +167,58 @@ pub fn run() {
             tauri::async_runtime::spawn(updater::schedule(handle.clone()));
             Ok(())
         })
-        .run(tauri::generate_context!());
-    if let Err(error) = result {
-        eprintln!("wyvpn app failed: {error}");
-        std::process::exit(1);
-    }
+        .build(tauri::generate_context!());
+    let app = match result {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("wyvpn app failed: {error}");
+            std::process::exit(1);
+        }
+    };
+    app.run(|app, event| match event {
+        tauri::RunEvent::ExitRequested { code, api, .. }
+            if keeps_running(code, app.state::<Ctx>().tray_ok.load(Ordering::Relaxed)) =>
+        {
+            api.prevent_exit();
+        }
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen { .. } => shell::show_main(app),
+        _ => {}
+    });
 }
 
 #[cfg(test)]
 mod tests {
+    use super::keeps_running;
+
+    #[test]
+    fn implicit_exit_with_a_tray_keeps_running() {
+        assert!(keeps_running(None, true));
+    }
+
+    #[test]
+    fn implicit_exit_without_a_tray_exits() {
+        assert!(!keeps_running(None, false));
+    }
+
+    #[test]
+    fn explicit_exit_with_a_tray_exits() {
+        assert!(!keeps_running(Some(0), true));
+    }
+
+    #[test]
+    fn main_window_is_created_on_demand() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let main = config["app"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|window| window["label"] == "main")
+            .unwrap();
+        assert_eq!(main["create"], false);
+    }
+
     #[test]
     fn capability_allows_title_bar_double_click() {
         let capability: serde_json::Value =

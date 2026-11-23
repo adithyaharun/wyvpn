@@ -156,3 +156,5 @@ export type UpdatePromptOutcome = "available" | "up_to_date" | "failed";
 export interface UpdatePrompt {
   outcome: UpdatePromptOutcome;
 }
+
+export type WindowRequest = { kind: "licenses" } | ({ kind: "update_prompt" } & UpdatePrompt);

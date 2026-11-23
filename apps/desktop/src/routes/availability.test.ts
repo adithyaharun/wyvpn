@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ConnectionStatus, DaemonAvailability, ProfileSummary } from "$lib/types";
+import type { ConnectionStatus, DaemonAvailability, ProfileSummary, WindowRequest } from "$lib/types";
 
 const invoke = vi.hoisted(() => vi.fn());
 const handlers = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
@@ -39,6 +39,7 @@ const connected: ConnectionStatus = {
 
 const outdated = { client_version: "0.1.2", client_protocol: 1, daemon_version: "0.1.1", daemon_protocol: 1 };
 const outdatedTitle = "The WyVPN service restarts after you disconnect";
+let windowRequests: WindowRequest[] = [];
 
 function backend(
   availability: DaemonAvailability,
@@ -68,6 +69,8 @@ function backend(
         return "MIT License text";
       case "openvpn_notice":
         return { license: "GPL-2.0", source_url: null };
+      case "take_window_requests":
+        return windowRequests.splice(0);
       default:
         return null;
     }
@@ -76,6 +79,7 @@ function backend(
 
 describe("daemon availability screens", () => {
   beforeEach(() => {
+    windowRequests = [];
     handlers.clear();
     invoke.mockReset();
     daemon.dispatch({ type: "availability", available: false, socket: "" });
@@ -202,6 +206,7 @@ describe("daemon availability screens", () => {
     render(Page);
     await vi.waitFor(() => expect(handlers.has("app://open-licenses")).toBe(true));
 
+    windowRequests.push({ kind: "licenses" });
     handlers.get("app://open-licenses")?.({ payload: null });
     expect(await screen.findByText("MIT License text")).toBeInTheDocument();
   });

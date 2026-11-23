@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-take-window-requests"
+description = "Enables the take_window_requests command without any pre-configured scope."
+commands.allow = ["take_window_requests"]
+
+[[permission]]
+identifier = "deny-take-window-requests"
+description = "Denies the take_window_requests command without any pre-configured scope."
+commands.deny = ["take_window_requests"]
